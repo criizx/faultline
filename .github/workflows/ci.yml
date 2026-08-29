@@ -1,0 +1,41 @@
+name: Quality Gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-gate:
+    name: Format, build and test
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Install system tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang-format clang-tidy cmake ninja-build shellcheck
+      - name: Install LLVM tools
+        if: runner.os == 'macOS'
+        run: brew install llvm
+      - name: Run quality gate
+        env:
+          FAULTLINE_SANITIZERS: ${{ runner.os == 'Linux' && 'ON' || 'OFF' }}
+        run: scripts/verify.sh
+      - name: Check example scenario
+        run: ./.build/checks/faultline check --config examples/unstable-api.conf

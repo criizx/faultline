@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b0d0c" />
+    <title>Faultline Control</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="noise"></div>
+    <main class="shell">
+      <header class="topbar">
+        <a class="brand" href="#" aria-label="Faultline dashboard">
+          <span class="brand-mark"><i></i><i></i><i></i></span>
+          <span>FAULTLINE</span>
+          <small>CONTROL LAB</small>
+        </a>
+        <div class="top-actions">
+          <div class="connection-status" id="connectionStatus"><span></span><strong>CONNECTING</strong></div>
+          <button class="icon-button" id="settingsButton" aria-label="Connection settings">⚙</button>
+        </div>
+      </header>
+
+      <section class="hero">
+        <div>
+          <p class="eyebrow">NETWORK FAILURE ORCHESTRATION</p>
+          <h1 id="scenarioName">Waiting for signal<span>.</span></h1>
+          <p class="hero-copy">Observe a deterministic chaos run and reshape traffic while it is moving.</p>
+        </div>
+        <div class="run-meta">
+          <div><span>EXPERIMENT</span><code id="experimentId">—</code></div>
+          <div><span>RUN</span><code id="runId">—</code></div>
+          <div><span>UPTIME</span><strong id="uptime">00:00:00</strong></div>
+        </div>
+      </section>
+
+      <section class="metrics" aria-label="Run metrics">
+        <article class="metric primary"><span>ACTIVE</span><strong id="activeMetric">0</strong><small>open connections</small></article>
+        <article class="metric"><span>ACCEPTED</span><strong id="acceptedMetric">0</strong><small>total sessions</small></article>
+        <article class="metric"><span>COMPLETED</span><strong id="completedMetric">0</strong><small>clean or closed</small></article>
+        <article class="metric danger"><span>DISRUPTED</span><strong id="disruptedMetric">0</strong><small>resets + timeouts</small></article>
+        <article class="metric"><span>TRANSFERRED</span><strong id="bytesMetric">0 B</strong><small>both directions</small></article>
+        <article class="metric"><span>TRANSITIONS</span><strong id="transitionsMetric">0</strong><small>stage changes</small></article>
+      </section>
+
+      <section class="workspace">
+        <article class="panel traffic-panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">LIVE MUTATION</p><h2>Traffic policy</h2></div>
+            <span class="unsaved" id="unsavedBadge">SYNCED</span>
+          </div>
+          <div class="direction-tabs" role="tablist">
+            <button class="tab active" data-direction="upstream" role="tab">↑ UPSTREAM</button>
+            <button class="tab" data-direction="downstream" role="tab">↓ DOWNSTREAM</button>
+          </div>
+          <form id="policyForm">
+            <label>
+              <span><b>Latency</b><output id="latencyOutput">0 ms</output></span>
+              <input id="latency" name="latency_ms" type="range" min="0" max="5000" step="10" />
+              <small>Base delay applied to every chunk</small>
+            </label>
+            <label>
+              <span><b>Jitter</b><output id="jitterOutput">0 ms</output></span>
+              <input id="jitter" name="jitter_ms" type="range" min="0" max="2000" step="5" />
+              <small>Deterministic variance around latency</small>
+            </label>
+            <label>
+              <span><b>Bandwidth ceiling</b><output id="bandwidthOutput">Unlimited</output></span>
+              <input id="bandwidth" name="bandwidth_kbps" type="range" min="0" max="100000" step="100" />
+              <small>0 means the limiter is bypassed</small>
+            </label>
+            <button class="apply-button" type="submit"><span>APPLY TO LIVE RUN</span><b>↗</b></button>
+          </form>
+          <p class="form-message" id="formMessage" role="status"></p>
+        </article>
+
+        <article class="panel stage-panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">SCENARIO SEQUENCE</p><h2>Fault stages</h2></div>
+            <span class="stage-count" id="stageCount">0 STAGES</span>
+          </div>
+          <div class="stage-list" id="stageList">
+            <div class="empty-state"><span>⌁</span><p>No stage data yet</p></div>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel endpoint-panel">
+        <div><p class="eyebrow">ROUTING</p><h2>Signal path</h2></div>
+        <div class="signal-path">
+          <div><span>CLIENT</span><strong>External traffic</strong></div><i>→</i>
+          <div class="fault-node"><span>FAULTLINE</span><strong id="listenEndpoint">—</strong></div><i>→</i>
+          <div><span>UPSTREAM</span><strong id="upstreamEndpoint">—</strong></div>
+        </div>
+        <button class="shutdown-button" id="shutdownButton">STOP RUN</button>
+      </section>
+    </main>
+
+    <dialog id="settingsDialog">
+      <form method="dialog" id="settingsForm">
+        <div class="dialog-heading"><div><p class="eyebrow">CONNECTION</p><h2>Control endpoint</h2></div><button value="cancel" aria-label="Close">×</button></div>
+        <label><span>Base URL</span><input id="baseUrl" type="url" placeholder="http://127.0.0.1:9090" required /></label>
+        <label><span>Bearer token</span><input id="authToken" type="password" autocomplete="off" placeholder="Optional" /></label>
+        <p>Credentials stay in this browser and are sent only to the endpoint above.</p>
+        <button class="apply-button" value="default" type="submit"><span>SAVE & CONNECT</span><b>↗</b></button>
+      </form>
+    </dialog>
+
+    <script src="./runtime-config.js"></script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

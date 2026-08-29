@@ -1,0 +1,14 @@
+services:
+  echo:
+    image: python:3.13-alpine
+    command: python /demo/echo_server.py
+    volumes:
+      - ./demo:/demo:ro
+
+  faultline:
+    depends_on:
+      - echo
+    environment:
+      FAULTLINE_EXPERIMENT_ID: docker-demo
+      FAULTLINE_UPSTREAM_HOST: echo
+      FAULTLINE_UPSTREAM_PORT: 9000

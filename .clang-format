@@ -1,0 +1,6 @@
+Language: Cpp
+BasedOnStyle: Microsoft
+Standard: Latest
+ColumnLimit: 120
+SortIncludes: CaseInsensitive
+FixNamespaceComments: false

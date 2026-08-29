@@ -1,0 +1,34 @@
+---
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  performance-*,
+  portability-*,
+  readability-container-*,
+  readability-identifier-naming,
+  readability-make-member-function-const,
+  readability-redundant-*
+WarningsAsErrors: ''
+HeaderFilterRegex: '^(src|include|tests)/'
+CheckOptions:
+  readability-identifier-naming.NamespaceCase: lower_case
+  readability-identifier-naming.ClassCase: CamelCase
+  readability-identifier-naming.StructCase: CamelCase
+  readability-identifier-naming.EnumCase: CamelCase
+  readability-identifier-naming.TypedefCase: CamelCase
+  readability-identifier-naming.TypeTemplateParameterCase: CamelCase
+  readability-identifier-naming.EnumConstantCase: CamelCase
+  readability-identifier-naming.FunctionCase: lower_case
+  readability-identifier-naming.MethodCase: lower_case
+  readability-identifier-naming.VariableCase: lower_case
+  readability-identifier-naming.ParameterCase: lower_case
+  readability-identifier-naming.MemberCase: lower_case
+  readability-identifier-naming.PrivateMemberCase: lower_case
+  readability-identifier-naming.ProtectedMemberCase: lower_case
+  readability-identifier-naming.PublicMemberCase: lower_case
+  readability-identifier-naming.PrivateMemberPrefix: ''
+  readability-identifier-naming.PrivateMemberSuffix: '_'
+  readability-identifier-naming.AbstractClassCase: CamelCase
+  readability-identifier-naming.AbstractClassPrefix: I
+  readability-identifier-naming.MacroDefinitionCase: UPPER_CASE
