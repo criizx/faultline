@@ -150,9 +150,8 @@ void send_all(int descriptor, std::string_view payload)
     }
 }
 
-std::string receive_exact(int descriptor, std::size_t size)
+std::string receive_exact(int descriptor, std::string result)
 {
-    std::string result(size, '\0');
     std::size_t offset = 0;
     while (offset < result.size())
     {
@@ -377,13 +376,13 @@ void test_staged_runtime()
     ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     const auto first_started = std::chrono::steady_clock::now();
     send_all(client, "a");
-    require(receive_exact(client, 1) == "a", "staged first exchange failed");
+    require(receive_exact(client, std::string(1, '\0')) == "a", "staged first exchange failed");
     const auto first_elapsed = std::chrono::steady_clock::now() - first_started;
     require(first_elapsed >= 120ms, "initial stage fault was not applied");
     std::this_thread::sleep_for(180ms);
     const auto second_started = std::chrono::steady_clock::now();
     send_all(client, "b");
-    require(receive_exact(client, 1) == "b", "staged recovered exchange failed");
+    require(receive_exact(client, std::string(1, '\0')) == "b", "staged recovered exchange failed");
     const auto second_elapsed = std::chrono::steady_clock::now() - second_started;
     ::close(client);
     proxy.request_stop();
@@ -486,7 +485,7 @@ void test_large_half_close()
         payload[index] = static_cast<char>('a' + index % 26);
     send_all(client, payload);
     require(::shutdown(client, SHUT_WR) == 0, "client half-close failed");
-    const auto response = receive_exact(client, payload.size());
+    const auto response = receive_exact(client, std::string(payload.size(), '\0'));
     char trailing{};
     require(::recv(client, &trailing, 1, 0) == 0, "proxy did not propagate half-close");
     ::close(client);
@@ -517,7 +516,7 @@ void test_fault_waits_do_not_trigger_idle_timeout()
     ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     const auto started = std::chrono::steady_clock::now();
     send_all(client, "z");
-    const auto response = receive_exact(client, 1);
+    const auto response = receive_exact(client, std::string(1, '\0'));
     const auto elapsed = std::chrono::steady_clock::now() - started;
     ::close(client);
     proxy.request_stop();
@@ -543,7 +542,7 @@ void test_connection_limit_and_worker_reaping()
     std::jthread proxy_thread([&proxy](const std::stop_token &token) { proxy.run(token); });
     const int first = connect_local(proxy_port);
     send_all(first, "a");
-    require(receive_exact(first, 1) == "a", "first limited connection failed");
+    require(receive_exact(first, std::string(1, '\0')) == "a", "first limited connection failed");
 
     const int rejected = connect_local(proxy_port);
     timeval timeout{1, 0};
@@ -559,7 +558,7 @@ void test_connection_limit_and_worker_reaping()
 
     const int next = connect_local(proxy_port);
     send_all(next, "c");
-    require(receive_exact(next, 1) == "c", "reaped worker did not release connection slot");
+    require(receive_exact(next, std::string(1, '\0')) == "c", "reaped worker did not release connection slot");
     ::close(next);
     proxy.request_stop();
     proxy_thread.request_stop();

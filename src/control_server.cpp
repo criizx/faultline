@@ -444,10 +444,10 @@ struct ControlServer::Impl
                 if (received <= 0)
                     break;
                 request.append(buffer.data(), static_cast<std::size_t>(received));
-                if (request.find("\r\n\r\n") != std::string::npos)
+                if (request.contains("\r\n\r\n"))
                     break;
             }
-            if (request.find("\r\n\r\n") == std::string::npos)
+            if (!request.contains("\r\n\r\n"))
                 throw std::runtime_error("incomplete HTTP request");
             const auto parsed = parse_request(request);
             send_all(client.get(), route(parsed));

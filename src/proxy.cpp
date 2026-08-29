@@ -34,6 +34,36 @@ namespace
 using Clock = std::chrono::steady_clock;
 using SystemClock = std::chrono::system_clock;
 
+enum class RunStatus : std::uint8_t
+{
+    Created,
+    Starting,
+    Running,
+    Stopping,
+    Stopped,
+    Failed
+};
+
+std::string_view status_name(RunStatus status) noexcept
+{
+    switch (status)
+    {
+    case RunStatus::Created:
+        return "created";
+    case RunStatus::Starting:
+        return "starting";
+    case RunStatus::Running:
+        return "running";
+    case RunStatus::Stopping:
+        return "stopping";
+    case RunStatus::Stopped:
+        return "stopped";
+    case RunStatus::Failed:
+        return "failed";
+    }
+    return "failed";
+}
+
 std::uint64_t unix_milliseconds()
 {
     return static_cast<std::uint64_t>(
@@ -338,9 +368,9 @@ struct ProxyServer::Impl
     std::vector<SessionWorker> sessions;
     mutable std::mutex lifecycle_mutex;
     std::string run_id{make_run_id()};
-    std::string lifecycle_status{"created"};
+    std::atomic<RunStatus> lifecycle_status{RunStatus::Created};
     std::uint64_t started_at_unix_ms{};
-    Clock::time_point started_at{};
+    Clock::time_point started_at;
 
     Impl(Scenario scenario_value, std::ostream &output, std::shared_ptr<Metrics> metrics_value)
         : scenario(std::move(scenario_value)), logs(output), metrics(std::move(metrics_value))
@@ -362,15 +392,18 @@ struct ProxyServer::Impl
                 ? 0
                 : static_cast<std::uint64_t>(
                       std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started_at).count());
-        return {
-            current_scenario.experiment_id, run_id, current_scenario.name, lifecycle_status, started_at_unix_ms, uptime,
-            current_scenario.stages.size()};
+        return {current_scenario.experiment_id,
+                run_id,
+                current_scenario.name,
+                std::string(status_name(lifecycle_status.load())),
+                started_at_unix_ms,
+                uptime,
+                current_scenario.stages.size()};
     }
 
-    void set_status(std::string value)
+    void set_status(RunStatus value) noexcept
     {
-        std::lock_guard lock(lifecycle_mutex);
-        lifecycle_status = std::move(value);
+        lifecycle_status.store(value);
     }
 
     [[nodiscard]] RuntimeSnapshot runtime_snapshot(const Scenario &connection_scenario,
@@ -702,7 +735,7 @@ struct ProxyServer::Impl
     {
         {
             std::lock_guard lock(lifecycle_mutex);
-            lifecycle_status = "starting";
+            lifecycle_status.store(RunStatus::Starting);
             started_at_unix_ms = unix_milliseconds();
             started_at = Clock::now();
         }
@@ -714,10 +747,10 @@ struct ProxyServer::Impl
         }
         catch (...)
         {
-            set_status("failed");
+            set_status(RunStatus::Failed);
             throw;
         }
-        set_status("running");
+        set_status(RunStatus::Running);
         log("proxy_started", 0, startup_scenario.name);
         std::uint64_t next_id = 1;
         while (!stopping.load() && !token.stop_requested())
@@ -764,7 +797,7 @@ struct ProxyServer::Impl
         for (auto &session : sessions)
             session.thread.request_stop();
         sessions.clear();
-        set_status("stopped");
+        set_status(RunStatus::Stopped);
         log("proxy_stopped", 0, metrics->json());
     }
 };
@@ -791,7 +824,7 @@ void ProxyServer::request_stop() noexcept
     if (const auto impl = impl_)
     {
         if (!impl->stopping.exchange(true))
-            impl->set_status("stopping");
+            impl->set_status(RunStatus::Stopping);
     }
 }
 
