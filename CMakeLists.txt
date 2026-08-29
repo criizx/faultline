@@ -60,5 +60,6 @@ if(FAULTLINE_BUILD_TESTS)
         live_policy
     )
         add_test(NAME ${test_name} COMMAND faultline_tests ${test_name})
+        set_tests_properties(${test_name} PROPERTIES TIMEOUT 15)
     endforeach()
 endif()

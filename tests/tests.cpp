@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -67,10 +68,11 @@ class EchoServer
     ~EchoServer()
     {
         thread_.request_stop();
-        if (listener_ >= 0)
-            ::close(listener_);
         if (client_ >= 0)
             ::shutdown(client_, SHUT_RDWR);
+        thread_.join();
+        if (listener_ >= 0)
+            ::close(listener_);
     }
 
   private:
@@ -91,6 +93,10 @@ class EchoServer
         ready_ = true;
         while (!token.stop_requested())
         {
+            pollfd descriptor{listener_, POLLIN, 0};
+            const int poll_status = ::poll(&descriptor, 1, 50);
+            if (poll_status <= 0 || (descriptor.revents & POLLIN) == 0)
+                continue;
             client_ = ::accept(listener_, nullptr, nullptr);
             if (client_ < 0)
                 break;
