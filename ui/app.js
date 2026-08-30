@@ -122,7 +122,7 @@ function renderStages(stages, connections) {
     const progressWidth = Math.min(100 - progressStart, Math.max(2, progressEnd - progressStart))
     const progressLabel = progressStart === progressEnd
       ? `${progressEnd.toFixed(0)}%`
-      : `${progressStart.toFixed(0)}–${progressEnd.toFixed(0)}%`
+      : `${progressStart.toFixed(0)}-${progressEnd.toFixed(0)}%`
     return `
     <div class="stage ${active.length ? "active-stage" : ""}">
       <span class="stage-index">${index + 1}</span>
@@ -144,7 +144,7 @@ function render(next) {
   recordSample(metrics, lifecycle.run_id)
   byId("scenarioName").innerHTML = `${escapeHtml(scenario.name)}<span>.</span>`
   byId("experimentId").textContent = lifecycle.experiment_id || "unassigned"
-  byId("runId").textContent = lifecycle.run_id || "—"
+  byId("runId").textContent = lifecycle.run_id || "-"
   byId("uptime").textContent = formatDuration(lifecycle.uptime_ms)
   byId("activeMetric").textContent = metrics.active_connections.toLocaleString()
   byId("acceptedMetric").textContent = metrics.accepted_connections.toLocaleString()
