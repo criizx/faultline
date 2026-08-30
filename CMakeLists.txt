@@ -51,6 +51,7 @@ if(FAULTLINE_BUILD_TESTS)
         round_trip_and_latency
         staged_runtime
         forced_reset
+        initial_stage_reset
         bandwidth_limit
         large_half_close
         fault_wait

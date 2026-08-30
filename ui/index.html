@@ -44,6 +44,21 @@
         <article class="metric"><span>TRANSITIONS</span><strong id="transitionsMetric">0</strong><small>stage changes</small></article>
       </section>
 
+      <section class="panel pulse-panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">LIVE TELEMETRY</p><h2>Traffic pulse</h2></div>
+          <div class="rate-legend"><span class="upstream-rate">↑ <b id="upstreamRate">0 B/s</b></span><span class="downstream-rate">↓ <b id="downstreamRate">0 B/s</b></span></div>
+        </div>
+        <div class="chart-wrap">
+          <svg id="trafficChart" viewBox="0 0 600 120" preserveAspectRatio="none" role="img" aria-label="Upstream and downstream transfer rate history">
+            <path class="chart-grid" d="M0 30H600M0 60H600M0 90H600"></path>
+            <path class="chart-line upstream-line" id="upstreamLine"></path>
+            <path class="chart-line downstream-line" id="downstreamLine"></path>
+          </svg>
+          <span>120 SECOND WINDOW</span>
+        </div>
+      </section>
+
       <section class="workspace">
         <article class="panel traffic-panel">
           <div class="panel-heading">
@@ -80,6 +95,7 @@
             <div><p class="eyebrow">SCENARIO SEQUENCE</p><h2>Fault stages</h2></div>
             <span class="stage-count" id="stageCount">0 STAGES</span>
           </div>
+          <p class="stage-note">Each connection starts its own stage timeline when accepted.</p>
           <div class="stage-list" id="stageList">
             <div class="empty-state"><span>⌁</span><p>No stage data yet</p></div>
           </div>

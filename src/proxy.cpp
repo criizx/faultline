@@ -23,6 +23,7 @@
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -330,6 +331,16 @@ struct RuntimeSnapshot
     Clock::time_point stage_started;
 };
 
+struct ActiveConnectionState
+{
+    std::uint64_t connection_id{};
+    std::string state;
+    std::size_t stage_index{};
+    std::string stage_name;
+    Clock::time_point stage_started;
+    std::uint64_t stage_started_at_unix_ms{};
+};
+
 constexpr std::size_t k_read_buffer_size = std::size_t{16} * 1024;
 constexpr std::size_t k_max_queued_bytes = std::size_t{4} * 1024 * 1024;
 
@@ -337,10 +348,11 @@ constexpr std::size_t k_max_queued_bytes = std::size_t{4} * 1024 * 1024;
 
 MetricsSnapshot Metrics::snapshot() const noexcept
 {
-    return {accepted_connections_.load(), active_connections_.load(),    completed_connections_.load(),
-            reset_connections_.load(),    timed_out_connections_.load(), upstream_bytes_.load(),
-            downstream_bytes_.load(),     delayed_chunks_.load(),        throttled_writes_.load(),
-            policy_updates_.load(),       stage_transitions_.load()};
+    return {accepted_connections_.load(), active_connections_.load(),      completed_connections_.load(),
+            reset_connections_.load(),    stage_reset_connections_.load(), timed_out_connections_.load(),
+            upstream_bytes_.load(),       downstream_bytes_.load(),        delayed_chunks_.load(),
+            throttled_writes_.load(),     policy_updates_.load(),          stage_transitions_.load(),
+            blackout_entries_.load()};
 }
 
 std::string Metrics::json() const
@@ -349,10 +361,11 @@ std::string Metrics::json() const
     std::ostringstream out;
     out << "{\"accepted_connections\":" << s.accepted_connections << ",\"active_connections\":" << s.active_connections
         << ",\"completed_connections\":" << s.completed_connections << ",\"reset_connections\":" << s.reset_connections
+        << ",\"stage_reset_connections\":" << s.stage_reset_connections
         << ",\"timed_out_connections\":" << s.timed_out_connections << ",\"upstream_bytes\":" << s.upstream_bytes
         << ",\"downstream_bytes\":" << s.downstream_bytes << ",\"delayed_chunks\":" << s.delayed_chunks
         << ",\"throttled_writes\":" << s.throttled_writes << ",\"policy_updates\":" << s.policy_updates
-        << ",\"stage_transitions\":" << s.stage_transitions << '}';
+        << ",\"stage_transitions\":" << s.stage_transitions << ",\"blackout_entries\":" << s.blackout_entries << '}';
     return out.str();
 }
 
@@ -366,6 +379,8 @@ struct ProxyServer::Impl
     Socket listener;
     std::vector<ResolvedAddress> upstream_addresses;
     std::vector<SessionWorker> sessions;
+    mutable std::mutex connections_mutex;
+    std::unordered_map<std::uint64_t, ActiveConnectionState> active_connections;
     mutable std::mutex lifecycle_mutex;
     std::string run_id{make_run_id()};
     std::atomic<RunStatus> lifecycle_status{RunStatus::Created};
@@ -404,6 +419,63 @@ struct ProxyServer::Impl
     void set_status(RunStatus value) noexcept
     {
         lifecycle_status.store(value);
+    }
+
+    void register_connection(std::uint64_t connection_id)
+    {
+        const auto now = Clock::now();
+        std::lock_guard lock(connections_mutex);
+        active_connections.insert_or_assign(
+            connection_id, ActiveConnectionState{connection_id, "connecting", 0, {}, now, unix_milliseconds()});
+    }
+
+    void set_connection_stage(std::uint64_t connection_id, const RuntimeSnapshot &runtime,
+                              Clock::time_point connection_started, std::uint64_t connection_started_at_unix_ms)
+    {
+        const auto stage_offset = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(runtime.stage_started - connection_started).count());
+        std::lock_guard lock(connections_mutex);
+        active_connections.insert_or_assign(
+            connection_id, ActiveConnectionState{connection_id, "active", runtime.stage_index, runtime.stage_name,
+                                                 runtime.stage_started, connection_started_at_unix_ms + stage_offset});
+    }
+
+    void remove_connection(std::uint64_t connection_id)
+    {
+        std::lock_guard lock(connections_mutex);
+        active_connections.erase(connection_id);
+    }
+
+    [[nodiscard]] std::string connections_json() const
+    {
+        std::vector<ActiveConnectionState> connections;
+        {
+            std::lock_guard lock(connections_mutex);
+            connections.reserve(active_connections.size());
+            for (const auto &entry : active_connections)
+                connections.push_back(entry.second);
+        }
+        std::ranges::sort(connections, {}, &ActiveConnectionState::connection_id);
+        const auto now = Clock::now();
+        std::ostringstream out;
+        out << '[';
+        for (std::size_t index = 0; index < connections.size(); ++index)
+        {
+            if (index != 0)
+                out << ',';
+            const auto &connection = connections[index];
+            const auto elapsed =
+                connection.state == "active"
+                    ? static_cast<std::uint64_t>(
+                          std::chrono::duration_cast<std::chrono::milliseconds>(now - connection.stage_started).count())
+                    : 0;
+            out << "{\"connection_id\":" << connection.connection_id << ",\"state\":\"" << connection.state
+                << "\",\"stage_index\":" << connection.stage_index << ",\"stage_name\":\""
+                << json_escape(connection.stage_name) << "\",\"stage_elapsed_ms\":" << elapsed
+                << ",\"stage_started_at_unix_ms\":" << connection.stage_started_at_unix_ms << '}';
+        }
+        out << ']';
+        return out.str();
     }
 
     [[nodiscard]] RuntimeSnapshot runtime_snapshot(const Scenario &connection_scenario,
@@ -613,15 +685,19 @@ struct ProxyServer::Impl
         struct ActiveGuard
         {
             Metrics &metrics;
+            Impl &owner;
+            std::uint64_t connection_id;
             ~ActiveGuard()
             {
                 metrics.active_connections_.fetch_sub(1);
                 metrics.completed_connections_.fetch_add(1);
+                owner.remove_connection(connection_id);
             }
-        } guard{*metrics};
+        } guard{*metrics, *this, connection_id};
 
         try
         {
+            register_connection(connection_id);
             const auto connection_scenario = scenario_snapshot();
             std::mt19937_64 random(connection_scenario.seed ^ (connection_id * 0x9e3779b97f4a7c15ULL));
             const auto initial_reset_probability = connection_scenario.stages.empty()
@@ -631,6 +707,8 @@ struct ProxyServer::Impl
             {
                 force_reset(client.get());
                 metrics->reset_connections_.fetch_add(1);
+                if (!connection_scenario.stages.empty())
+                    metrics->stage_reset_connections_.fetch_add(1);
                 log("connection_reset", connection_id, "scenario probability matched");
                 return;
             }
@@ -640,7 +718,9 @@ struct ProxyServer::Impl
             set_nonblocking(client.get());
 
             const auto started = Clock::now();
+            const auto connection_started_at_unix_ms = unix_milliseconds();
             const auto initial_runtime = runtime_snapshot(connection_scenario, started, started);
+            set_connection_stage(connection_id, initial_runtime, started, connection_started_at_unix_ms);
             PipeState to_upstream;
             to_upstream.source = client.get();
             to_upstream.destination = upstream.get();
@@ -651,6 +731,7 @@ struct ProxyServer::Impl
             to_downstream.policy = initial_runtime.downstream;
             auto last_activity = started;
             std::size_t last_stage_index = initial_runtime.stage_index;
+            bool blackout_was_active = false;
             log("connection_open", connection_id, initial_runtime.stage_name);
 
             while (!stopping.load() && !token.stop_requested())
@@ -659,20 +740,34 @@ struct ProxyServer::Impl
                 const auto runtime = runtime_snapshot(connection_scenario, started, now);
                 if (runtime.stage_index != last_stage_index)
                 {
-                    last_stage_index = runtime.stage_index;
-                    metrics->stage_transitions_.fetch_add(1);
-                    log("stage_transition", connection_id, runtime.stage_name);
-                    if (std::bernoulli_distribution(runtime.reset_probability)(random))
+                    blackout_was_active = false;
+                    for (std::size_t stage_index = last_stage_index + 1; stage_index <= runtime.stage_index;
+                         ++stage_index)
                     {
-                        force_reset(client.get());
-                        metrics->reset_connections_.fetch_add(1);
-                        log("connection_reset", connection_id, "stage probability matched");
-                        return;
+                        const auto &stage = connection_scenario.stages[stage_index];
+                        metrics->stage_transitions_.fetch_add(1);
+                        log("stage_transition", connection_id, stage.name);
+                        if (std::bernoulli_distribution(stage.reset_probability)(random))
+                        {
+                            force_reset(client.get());
+                            metrics->reset_connections_.fetch_add(1);
+                            metrics->stage_reset_connections_.fetch_add(1);
+                            log("connection_reset", connection_id, "stage probability matched");
+                            return;
+                        }
                     }
+                    last_stage_index = runtime.stage_index;
+                    set_connection_stage(connection_id, runtime, started, connection_started_at_unix_ms);
                 }
                 to_upstream.policy = runtime.upstream;
                 to_downstream.policy = runtime.downstream;
                 const bool blackout = blackout_active(runtime, now);
+                if (blackout && !blackout_was_active)
+                {
+                    metrics->blackout_entries_.fetch_add(1);
+                    log("blackout_entry", connection_id, runtime.stage_name);
+                }
+                blackout_was_active = blackout;
                 const bool delayed = (!to_upstream.queue.empty() && to_upstream.queue.front().ready_at > now) ||
                                      (!to_downstream.queue.empty() && to_downstream.queue.front().ready_at > now);
                 if (blackout || delayed)
@@ -856,6 +951,12 @@ std::string ProxyServer::lifecycle_json() const
         << "\",\"started_at_unix_ms\":" << snapshot.started_at_unix_ms << ",\"uptime_ms\":" << snapshot.uptime_ms
         << ",\"stage_count\":" << snapshot.stage_count << '}';
     return out.str();
+}
+
+std::string ProxyServer::connections_json() const
+{
+    const auto impl = impl_;
+    return impl->connections_json();
 }
 
 }

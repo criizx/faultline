@@ -71,8 +71,11 @@ curl http://127.0.0.1:9090/healthz
 curl http://127.0.0.1:9090/v1/metrics
 curl http://127.0.0.1:9090/v1/scenario
 curl http://127.0.0.1:9090/v1/lifecycle
+curl http://127.0.0.1:9090/v1/connections
 curl http://127.0.0.1:9090/v1/state
 ```
+
+`/v1/connections` returns connecting sessions plus the current stage and stage elapsed time for every active proxied connection. The dashboard uses this data to display per-stage activity and progress without assuming that all connections share one global timeline.
 
 Start the local control dashboard:
 
@@ -166,8 +169,6 @@ latency_ms=180
 jitter_ms=40
 bandwidth_kbps=1024
 ```
-
-See [scenario format](docs/SCENARIO_FORMAT.md) and [architecture](docs/ARCHITECTURE.md).
 
 For a staged run, use `examples/staged-api.conf`. Each `[stage.N]` section starts when a connection is created. Stages are evaluated in order; the final stage must use `duration_ms=0` to remain active. Set `scenario.experiment_id` when Militantyx needs to correlate the run with captured traffic; the identifier is returned by the control API and included in every lifecycle log.
 

@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cstring>
 #include <fcntl.h>
 #include <memory>
@@ -142,14 +143,16 @@ void send_all(int descriptor, std::string_view response)
     }
 }
 
-std::string make_response(int status, std::string_view reason, std::string_view body)
+std::string make_response(int status, std::string_view reason, std::string_view body, std::string_view identity_headers)
 {
     std::ostringstream response;
     response << "HTTP/1.1 " << status << ' ' << reason
              << "\r\nContent-Type: application/json\r\nContent-Length: " << body.size()
              << "\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *"
                 "\r\nAccess-Control-Allow-Headers: Authorization, Content-Type, X-Faultline-Confirm"
-                "\r\nAccess-Control-Allow-Methods: GET, PUT, POST, OPTIONS\r\nConnection: close\r\n\r\n"
+                "\r\nAccess-Control-Allow-Methods: GET, PUT, POST, OPTIONS"
+                "\r\nAccess-Control-Expose-Headers: X-Faultline-Experiment-ID, X-Faultline-Run-ID\r\n"
+             << identity_headers << "Connection: close\r\n\r\n"
              << body;
     return response.str();
 }
@@ -365,14 +368,31 @@ struct ControlServer::Impl
 
     void log(ControlLog record)
     {
-        const auto experiment_id = proxy.scenario_snapshot().experiment_id;
+        const auto lifecycle = proxy.lifecycle_snapshot();
+        const auto timestamp = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+                .count());
         std::ostringstream line;
-        line << "{\"event\":\"" << json_escape(record.event) << "\",\"experiment_id\":\"" << json_escape(experiment_id)
-             << '"';
+        line << "{\"event\":\"" << json_escape(record.event) << "\",\"experiment_id\":\""
+             << json_escape(lifecycle.experiment_id) << "\",\"run_id\":\"" << json_escape(lifecycle.run_id)
+             << "\",\"timestamp_unix_ms\":" << timestamp;
         if (!record.target.empty())
             line << ",\"target\":\"" << json_escape(record.target) << '"';
         line << '}';
         detail::write_log_line(logs, line.str());
+    }
+
+    std::string response(int status, std::string_view reason, std::string_view body,
+                         bool include_identity = false) const
+    {
+        std::ostringstream headers;
+        if (include_identity)
+        {
+            const auto lifecycle = proxy.lifecycle_snapshot();
+            headers << "X-Faultline-Experiment-ID: " << lifecycle.experiment_id
+                    << "\r\nX-Faultline-Run-ID: " << lifecycle.run_id << "\r\n";
+        }
+        return make_response(status, reason, body, headers.str());
     }
 
     bool authorized(const ParsedRequest &request) const
@@ -393,39 +413,44 @@ struct ControlServer::Impl
     std::string route(const ParsedRequest &request)
     {
         if (request.method == "OPTIONS")
-            return make_response(204, "No Content", {});
+            return response(204, "No Content", {});
         if (request.target.rfind("/v1/", 0) == 0 && !authorized(request))
-            return make_response(401, "Unauthorized", "{\"error\":\"authentication_required\"}");
+            return response(401, "Unauthorized", "{\"error\":\"authentication_required\"}");
         if (request.method == "POST" && request.target == "/v1/shutdown")
         {
             if (!confirmed(request, "shutdown"))
-                return make_response(403, "Forbidden", "{\"error\":\"confirmation_required\"}");
+                return response(403, "Forbidden", "{\"error\":\"confirmation_required\"}", true);
             proxy.request_stop();
-            return make_response(202, "Accepted", "{\"status\":\"stopping\"}");
+            return response(202, "Accepted", "{\"status\":\"stopping\"}", true);
         }
         if (request.method == "PUT" && request.target.rfind("/v1/policies/", 0) == 0)
         {
             if (!confirmed(request, "update"))
-                return make_response(403, "Forbidden", "{\"error\":\"confirmation_required\"}");
+                return response(403, "Forbidden", "{\"error\":\"confirmation_required\"}", true);
             const auto update = parse_policy_update(request.target, proxy.scenario_snapshot());
             proxy.update_policy(update.direction, update.policy);
-            return make_response(200, "OK", scenario_json(proxy.scenario_snapshot()));
+            return response(200, "OK", scenario_json(proxy.scenario_snapshot()), true);
         }
         if (request.method != "GET")
-            return make_response(405, "Method Not Allowed", "{\"error\":\"method_not_allowed\"}");
+            return response(405, "Method Not Allowed", "{\"error\":\"method_not_allowed\"}",
+                            request.target.rfind("/v1/", 0) == 0);
         if (request.target == "/healthz")
-            return make_response(200, "OK", "{\"status\":\"ok\"}");
+            return response(200, "OK", "{\"status\":\"ok\"}");
         if (request.target == "/v1/metrics")
-            return make_response(200, "OK", proxy.metrics().json());
+            return response(200, "OK", proxy.metrics().json(), true);
         if (request.target == "/v1/scenario")
-            return make_response(200, "OK", scenario_json(proxy.scenario_snapshot()));
+            return response(200, "OK", scenario_json(proxy.scenario_snapshot()), true);
         if (request.target == "/v1/lifecycle")
-            return make_response(200, "OK", proxy.lifecycle_json());
+            return response(200, "OK", proxy.lifecycle_json(), true);
+        if (request.target == "/v1/connections")
+            return response(200, "OK", proxy.connections_json(), true);
         if (request.target == "/v1/state")
-            return make_response(200, "OK",
-                                 "{\"scenario\":" + scenario_json(proxy.scenario_snapshot()) + ",\"metrics\":" +
-                                     proxy.metrics().json() + ",\"lifecycle\":" + proxy.lifecycle_json() + '}');
-        return make_response(404, "Not Found", "{\"error\":\"not_found\"}");
+            return response(200, "OK",
+                            "{\"scenario\":" + scenario_json(proxy.scenario_snapshot()) +
+                                ",\"metrics\":" + proxy.metrics().json() + ",\"lifecycle\":" + proxy.lifecycle_json() +
+                                ",\"connections\":" + proxy.connections_json() + '}',
+                            true);
+        return response(404, "Not Found", "{\"error\":\"not_found\"}", request.target.rfind("/v1/", 0) == 0);
     }
 
     void handle(Socket client)
@@ -456,7 +481,7 @@ struct ControlServer::Impl
         catch (const std::exception &error)
         {
             log({"control_bad_request", error.what()});
-            send_all(client.get(), make_response(400, "Bad Request", "{\"error\":\"bad_request\"}"));
+            send_all(client.get(), response(400, "Bad Request", "{\"error\":\"bad_request\"}"));
         }
     }
 
@@ -490,7 +515,7 @@ struct ControlServer::Impl
                 if (workers.size() >= 32)
                 {
                     set_blocking(client.get());
-                    send_all(client.get(), make_response(503, "Service Unavailable", "{\"error\":\"busy\"}"));
+                    send_all(client.get(), response(503, "Service Unavailable", "{\"error\":\"busy\"}"));
                     continue;
                 }
                 auto finished = std::make_shared<std::atomic_bool>(false);

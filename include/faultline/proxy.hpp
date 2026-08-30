@@ -19,6 +19,7 @@ struct MetricsSnapshot
     std::uint64_t active_connections{};
     std::uint64_t completed_connections{};
     std::uint64_t reset_connections{};
+    std::uint64_t stage_reset_connections{};
     std::uint64_t timed_out_connections{};
     std::uint64_t upstream_bytes{};
     std::uint64_t downstream_bytes{};
@@ -26,6 +27,7 @@ struct MetricsSnapshot
     std::uint64_t throttled_writes{};
     std::uint64_t policy_updates{};
     std::uint64_t stage_transitions{};
+    std::uint64_t blackout_entries{};
 };
 
 struct LifecycleSnapshot
@@ -37,6 +39,16 @@ struct LifecycleSnapshot
     std::uint64_t started_at_unix_ms{};
     std::uint64_t uptime_ms{};
     std::size_t stage_count{};
+};
+
+struct ActiveConnectionSnapshot
+{
+    std::uint64_t connection_id{};
+    std::string state;
+    std::size_t stage_index{};
+    std::string stage_name;
+    std::uint64_t stage_elapsed_ms{};
+    std::uint64_t stage_started_at_unix_ms{};
 };
 
 enum class TrafficDirection
@@ -57,6 +69,7 @@ class Metrics
     std::atomic_uint64_t active_connections_{};
     std::atomic_uint64_t completed_connections_{};
     std::atomic_uint64_t reset_connections_{};
+    std::atomic_uint64_t stage_reset_connections_{};
     std::atomic_uint64_t timed_out_connections_{};
     std::atomic_uint64_t upstream_bytes_{};
     std::atomic_uint64_t downstream_bytes_{};
@@ -64,6 +77,7 @@ class Metrics
     std::atomic_uint64_t throttled_writes_{};
     std::atomic_uint64_t policy_updates_{};
     std::atomic_uint64_t stage_transitions_{};
+    std::atomic_uint64_t blackout_entries_{};
 };
 
 class ProxyServer
@@ -81,6 +95,7 @@ class ProxyServer
     [[nodiscard]] Scenario scenario_snapshot() const;
     [[nodiscard]] LifecycleSnapshot lifecycle_snapshot() const;
     [[nodiscard]] std::string lifecycle_json() const;
+    [[nodiscard]] std::string connections_json() const;
     [[nodiscard]] const Metrics &metrics() const noexcept
     {
         return *metrics_;

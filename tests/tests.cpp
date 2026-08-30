@@ -30,6 +30,16 @@ void require(bool condition, const std::string &message)
         throw std::runtime_error(message);
 }
 
+template <std::size_t Size> std::uint64_t json_u64(std::string_view json, const char (&key)[Size])
+{
+    const auto prefix = '"' + std::string(key, Size - 1) + "\":";
+    const auto start = json.find(prefix);
+    require(start != std::string_view::npos, "JSON key missing: " + std::string(key, Size - 1));
+    const auto value_start = start + prefix.size();
+    const auto value_end = json.find_first_not_of("0123456789", value_start);
+    return std::stoull(std::string(json.substr(value_start, value_end - value_start)));
+}
+
 std::filesystem::path temporary_scenario(std::string_view body)
 {
     const auto path =
@@ -390,10 +400,23 @@ void test_staged_runtime()
     send_all(client, "b");
     require(receive_exact(client, std::string(1, '\0')) == "b", "staged recovered exchange failed");
     const auto second_elapsed = std::chrono::steady_clock::now() - second_started;
+    const auto connections = proxy.connections_json();
+    require(connections.contains("\"connection_id\":1"), "active connection snapshot missing");
+    require(connections.contains("\"state\":\"active\""), "active connection state mismatch");
+    require(connections.contains("\"stage_name\":\"recovered\""), "active connection stage mismatch");
+    require(connections.contains("\"stage_started_at_unix_ms\":"), "active stage timestamp missing");
+    const auto stage_started_at = json_u64(connections, "stage_started_at_unix_ms");
+    std::this_thread::sleep_for(30ms);
+    const auto later_connections = proxy.connections_json();
+    require(json_u64(later_connections, "stage_started_at_unix_ms") == stage_started_at,
+            "active stage timestamp changed between snapshots");
+    require(json_u64(later_connections, "stage_elapsed_ms") > json_u64(connections, "stage_elapsed_ms"),
+            "active stage elapsed time did not advance");
     ::close(client);
     proxy.request_stop();
     proxy_thread.request_stop();
     proxy_thread.join();
+    require(proxy.connections_json() == "[]", "completed connection remained in snapshot");
     require(second_elapsed < 100ms, "final stage policy was not activated");
     require(proxy.metrics().snapshot().stage_transitions > 0, "stage transition was not recorded");
     require(logs.str().find("stage_transition") != std::string::npos, "stage transition was not logged");
@@ -430,6 +453,34 @@ void test_forced_reset()
         std::this_thread::sleep_for(5ms);
     }
     require(proxy.metrics().snapshot().reset_connections == 1, "reset metric mismatch");
+}
+
+void test_initial_stage_reset()
+{
+    const int proxy_port = free_port();
+    faultline::Scenario scenario;
+    scenario.name = "initial-stage-reset";
+    scenario.listen_port = static_cast<std::uint16_t>(proxy_port);
+    faultline::Stage stage;
+    stage.name = "reset";
+    stage.duration_ms = 0;
+    stage.reset_probability = 1.0;
+    scenario.stages = {stage};
+    std::ostringstream logs;
+    faultline::ProxyServer proxy(scenario, logs);
+    std::jthread proxy_thread([&proxy](const std::stop_token &token) { proxy.run(token); });
+    const int client = connect_local(proxy_port);
+    timeval timeout{2, 0};
+    ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    char response{};
+    const auto received = ::recv(client, &response, 1, 0);
+    ::close(client);
+    proxy.request_stop();
+    proxy_thread.request_stop();
+    proxy_thread.join();
+    require(received <= 0, "initial stage reset left the connection usable");
+    require(proxy.metrics().snapshot().reset_connections == 1, "initial stage reset total mismatch");
+    require(proxy.metrics().snapshot().stage_reset_connections == 1, "initial stage reset metric mismatch");
 }
 
 void test_bandwidth_limit()
@@ -530,6 +581,7 @@ void test_fault_waits_do_not_trigger_idle_timeout()
     require(response == "z", "fault wait dropped payload");
     require(elapsed >= 350ms, "blackout or latency was not applied");
     require(proxy.metrics().snapshot().timed_out_connections == 0, "injected delay triggered idle timeout");
+    require(proxy.metrics().snapshot().blackout_entries == 1, "blackout entry metric mismatch");
 }
 
 void test_connection_limit_and_worker_reaping()
@@ -599,6 +651,7 @@ void test_control_api()
 {
     faultline::Scenario scenario;
     scenario.name = "control-api";
+    scenario.experiment_id = "control-api-test";
     scenario.control_port = static_cast<std::uint16_t>(free_port());
     scenario.control_token = "control-test-token";
     std::ostringstream logs;
@@ -609,11 +662,16 @@ void test_control_api()
     const auto health = http_request(scenario.control_port, "GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");
     require(health.find("200 OK") != std::string::npos, "health endpoint failed: " + health);
     require(health.find("{\"status\":\"ok\"}") != std::string::npos, "health response mismatch");
+    require(!health.contains("\r\nX-Faultline-Experiment-ID:"), "health leaked experiment identity");
+    require(!health.contains("\r\nX-Faultline-Run-ID:"), "health leaked run identity");
 
     const auto unauthenticated_state =
         http_request(scenario.control_port, "GET /v1/state HTTP/1.1\r\nHost: localhost\r\n\r\n");
     require(unauthenticated_state.find("401 Unauthorized") != std::string::npos,
             "state endpoint bypassed authentication");
+    require(!unauthenticated_state.contains("\r\nX-Faultline-Experiment-ID:"),
+            "unauthenticated response leaked experiment identity");
+    require(!unauthenticated_state.contains("\r\nX-Faultline-Run-ID:"), "unauthenticated response leaked run identity");
 
     const auto state = http_request(scenario.control_port, "GET /v1/state HTTP/1.1\r\nHost: localhost\r\n"
                                                            "Authorization: Bearer control-test-token\r\n\r\n");
@@ -622,6 +680,11 @@ void test_control_api()
     require(state.find("\"accepted_connections\":0") != std::string::npos, "state metrics missing");
     require(state.find("\"lifecycle\":{") != std::string::npos, "state lifecycle missing");
     require(state.find("\"run_id\":\"") != std::string::npos, "state run id missing");
+    require(state.contains("\"connections\":[]"), "state connections missing");
+    require(state.contains("X-Faultline-Experiment-ID: control-api-test"), "experiment response header missing");
+    require(state.contains("X-Faultline-Run-ID: "), "run response header missing");
+    require(state.contains("Access-Control-Expose-Headers: X-Faultline-Experiment-ID, X-Faultline-Run-ID"),
+            "correlation headers are not browser-visible");
 
     const auto preflight =
         http_request(scenario.control_port,
@@ -633,6 +696,11 @@ void test_control_api()
                                                                "Authorization: Bearer control-test-token\r\n\r\n");
     require(lifecycle.find("200 OK") != std::string::npos, "lifecycle endpoint failed");
     require(lifecycle.find("\"status\":\"created\"") != std::string::npos, "lifecycle status mismatch");
+
+    const auto connections = http_request(scenario.control_port, "GET /v1/connections HTTP/1.1\r\nHost: localhost\r\n"
+                                                                 "Authorization: Bearer control-test-token\r\n\r\n");
+    require(connections.contains("200 OK"), "connections endpoint failed");
+    require(connections.ends_with("[]"), "idle connections response mismatch");
 
     const auto rejected_update = http_request(
         scenario.control_port,
@@ -695,6 +763,8 @@ void test_control_api()
     control_thread.request_stop();
     control_thread.join();
     require(logs.str().find("bad\\\"target") != std::string::npos, "control log did not escape request target");
+    require(logs.str().contains("\"run_id\":"), "control log run id missing");
+    require(logs.str().contains("\"timestamp_unix_ms\":"), "control log timestamp missing");
     require(state.find("control-test-token") == std::string::npos, "control token leaked through state API");
 }
 
@@ -751,6 +821,7 @@ int main(int argc, char **argv)
             Test{"round_trip_and_latency", test_proxy_round_trip_and_latency},
             Test{"staged_runtime", test_staged_runtime},
             Test{"forced_reset", test_forced_reset},
+            Test{"initial_stage_reset", test_initial_stage_reset},
             Test{"bandwidth_limit", test_bandwidth_limit},
             Test{"large_half_close", test_large_half_close},
             Test{"fault_wait", test_fault_waits_do_not_trigger_idle_timeout},
