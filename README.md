@@ -4,6 +4,8 @@ Deterministic network chaos for testing how services behave when the network sto
 
 Faultline is a C++23 TCP proxy that injects latency, jitter, bandwidth limits, connection resets, timeouts, and temporary blackouts. It is designed as an infrastructure tool first: headless, scriptable, observable, and testable without a web interface.
 
+![Faultline Control Lab showing a running deterministic chaos experiment](assets/dashboard.jpg)
+
 ## Why Faultline
 
 Distributed systems rarely fail cleanly. A request may take five seconds instead of fifty milliseconds, a connection may reset halfway through a response, or bandwidth may collapse while every process remains healthy. Faultline makes those conditions reproducible on a developer machine and in CI.
@@ -48,12 +50,27 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+Create a release archive containing the binary, examples, dashboard, README, and license:
+
+```bash
+cmake --build build --target package
+```
+
+Tagged GitHub releases publish archives for Linux and macOS. After extracting one, the executable is under `bin/`, scenarios are under `share/faultline/examples/`, and the dashboard is under `share/faultline/ui/`.
+
 ## Run
 
 Validate a scenario:
 
 ```bash
 ./build/faultline check --config examples/unstable-api.conf
+```
+
+Display command help or the installed version:
+
+```bash
+./build/faultline --help
+./build/faultline --version
 ```
 
 Start the proxy:
@@ -130,7 +147,7 @@ The optional demo includes a tiny echo server so Faultline can be tried without 
 ./scripts/demo.sh
 ```
 
-Open `http://127.0.0.1:4173`. The script starts the regular stack with `compose.demo.yml`, which adds the echo service and points Faultline at it.
+Open `http://127.0.0.1:4173`. The script starts the regular stack with `compose.demo.yml`, which adds the echo service, points Faultline at it, and enables a visible latency, jitter, and bandwidth policy.
 
 To verify proxied traffic from another terminal:
 
@@ -139,6 +156,8 @@ python3 demo/client.py
 ```
 
 Stop the demo with `docker compose -f compose.yml -f compose.demo.yml down`.
+
+Run the same automated smoke test used by CI with `scripts/test-docker.sh`.
 
 ## Example scenario
 
@@ -193,7 +212,7 @@ Run the isolated Release benchmark suite with:
 scripts/run-benchmarks.sh
 ```
 
-Use `scripts/run-benchmarks.sh smoke` for a shorter harness check. Results are emitted as JSON Lines and cover latency accuracy, bandwidth accuracy, no-fault proxy overhead and process CPU time, and short-connection churn. Benchmarks are intentionally separate from the normal tests and make no universal performance claim. See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for the output contract and comparison limits.
+Use `scripts/run-benchmarks.sh smoke` for a shorter harness check. Results are emitted as JSON Lines and cover latency accuracy, bandwidth accuracy, no-fault proxy overhead and process CPU time, and short-connection churn. The first record contains the schema version, Faultline version, build type, profile, platform, architecture, compiler, and start time. The remaining records contain benchmark names, scenarios, inputs, and measurements. Benchmarks are intentionally separate from normal tests and make no universal performance claim. Compare results only when the environment and profile are controlled.
 
 ## License
 

@@ -21,10 +21,11 @@ void handle_signal(int)
 
 void print_usage(std::ostream &out)
 {
-    out << "Faultline 0.1.0\n"
-        << "Usage:\n"
+    out << "Usage:\n"
         << "  faultline run --config <path>\n"
-        << "  faultline check --config <path>\n";
+        << "  faultline check --config <path>\n"
+        << "  faultline --help\n"
+        << "  faultline --version\n";
 }
 
 }
@@ -33,6 +34,20 @@ int main(int argc, char **argv)
 {
     try
     {
+        if (argc == 2)
+        {
+            const std::string option = argv[1];
+            if (option == "--help" || option == "-h")
+            {
+                print_usage(std::cout);
+                return 0;
+            }
+            if (option == "--version")
+            {
+                std::cout << "faultline " << FAULTLINE_VERSION << '\n';
+                return 0;
+            }
+        }
         if (argc != 4 || std::string(argv[2]) != "--config")
         {
             print_usage(std::cerr);

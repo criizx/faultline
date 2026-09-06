@@ -25,13 +25,13 @@ printf '%s\n' \
   'reset_probability=0' \
   '' \
   '[upstream]' \
-  'latency_ms=0' \
-  'jitter_ms=0' \
-  'bandwidth_kbps=0' \
+  "latency_ms=${FAULTLINE_UPSTREAM_LATENCY_MS:-0}" \
+  "jitter_ms=${FAULTLINE_UPSTREAM_JITTER_MS:-0}" \
+  "bandwidth_kbps=${FAULTLINE_UPSTREAM_BANDWIDTH_KBPS:-0}" \
   '' \
   '[downstream]' \
-  'latency_ms=0' \
-  'jitter_ms=0' \
-  'bandwidth_kbps=0' > "$config_path"
+  "latency_ms=${FAULTLINE_DOWNSTREAM_LATENCY_MS:-0}" \
+  "jitter_ms=${FAULTLINE_DOWNSTREAM_JITTER_MS:-0}" \
+  "bandwidth_kbps=${FAULTLINE_DOWNSTREAM_BANDWIDTH_KBPS:-0}" > "$config_path"
 
 exec faultline run --config "$config_path"

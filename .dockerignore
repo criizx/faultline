@@ -1,0 +1,10 @@
+.git
+.github
+.githooks
+.build
+.cache
+build
+build-*
+docs
+compile_commands.json
+.DS_Store

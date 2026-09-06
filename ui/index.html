@@ -3,138 +3,133 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#0b0d0c" />
-    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
-    <title>Faultline Control</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <meta name="theme-color" content="#111417" />
+    <link rel="icon" href="./favicon.svg?v=0.1.0" type="image/svg+xml" />
+    <title>Faultline</title>
+    <link rel="stylesheet" href="./styles.css?v=0.1.0" />
   </head>
   <body>
-    <div class="noise"></div>
-    <main class="shell">
-      <header class="topbar">
+    <header class="app-bar">
+      <div class="app-bar-inner">
         <a class="brand" href="#" aria-label="Faultline dashboard">
-          <span class="brand-mark"><i></i><i></i><i></i></span>
-          <span>FAULTLINE</span>
-          <small>CONTROL LAB</small>
+          <strong>faultline</strong>
+          <span>control</span>
         </a>
         <div class="top-actions">
-          <div class="connection-status" id="connectionStatus"><span></span><strong>CONNECTING</strong></div>
-          <button class="icon-button" id="settingsButton" aria-label="Connection settings">⚙</button>
+          <div class="connection-status" id="connectionStatus"><span></span><strong>connecting</strong></div>
+          <button class="icon-button" id="settingsButton" aria-label="Connection settings" title="Connection settings">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h8m3 0h3M9 3v4M3 10h3m3 0h8M6 8v4M3 15h9m3 0h2m-5-2v4" /></svg>
+          </button>
         </div>
-      </header>
+      </div>
+    </header>
 
-      <section class="hero">
-        <div>
-          <p class="eyebrow">NETWORK FAILURE ORCHESTRATION</p>
-          <h1 id="scenarioName">Waiting for signal<span>.</span></h1>
-          <p class="hero-copy">Observe a deterministic chaos run and reshape traffic while it is moving.</p>
-        </div>
-        <div class="run-meta">
-          <div><span>EXPERIMENT</span><code id="experimentId">-</code></div>
-          <div><span>RUN</span><code id="runId">-</code></div>
-          <div><span>UPTIME</span><strong id="uptime">00:00:00</strong></div>
-        </div>
+    <main class="shell">
+      <section class="run-summary">
+        <div class="scenario-block"><span class="section-label">Scenario</span><h1 id="scenarioName">No connection</h1></div>
+        <dl class="run-meta">
+          <div><dt>Experiment</dt><dd><code id="experimentId">-</code></dd></div>
+          <div><dt>Run ID</dt><dd><code id="runId">-</code></dd></div>
+          <div><dt>Uptime</dt><dd><strong id="uptime">00:00:00</strong></dd></div>
+        </dl>
       </section>
 
       <section class="metrics" aria-label="Run metrics">
-        <article class="metric primary"><span>ACTIVE</span><strong id="activeMetric">0</strong><small>open connections</small></article>
-        <article class="metric"><span>ACCEPTED</span><strong id="acceptedMetric">0</strong><small>total sessions</small></article>
-        <article class="metric"><span>COMPLETED</span><strong id="completedMetric">0</strong><small>clean or closed</small></article>
-        <article class="metric danger"><span>DISRUPTED</span><strong id="disruptedMetric">0</strong><small>resets + timeouts</small></article>
-        <article class="metric"><span>TRANSFERRED</span><strong id="bytesMetric">0 B</strong><small>both directions</small></article>
-        <article class="metric"><span>TRANSITIONS</span><strong id="transitionsMetric">0</strong><small>stage changes</small></article>
+        <article class="metric"><span>Active</span><strong id="activeMetric">0</strong><small>connections</small></article>
+        <article class="metric"><span>Accepted</span><strong id="acceptedMetric">0</strong><small>sessions</small></article>
+        <article class="metric"><span>Completed</span><strong id="completedMetric">0</strong><small>sessions</small></article>
+        <article class="metric danger"><span>Disrupted</span><strong id="disruptedMetric">0</strong><small>resets and timeouts</small></article>
+        <article class="metric"><span>Transferred</span><strong id="bytesMetric">0 B</strong><small>both directions</small></article>
+        <article class="metric"><span>Transitions</span><strong id="transitionsMetric">0</strong><small>stage changes</small></article>
       </section>
 
-      <section class="panel pulse-panel">
-        <div class="panel-heading">
-          <div><p class="eyebrow">LIVE TELEMETRY</p><h2>Traffic pulse</h2></div>
-          <div class="rate-legend"><span class="upstream-rate">↑ <b id="upstreamRate">0 B/s</b></span><span class="downstream-rate">↓ <b id="downstreamRate">0 B/s</b></span></div>
-        </div>
-        <div class="chart-wrap">
-          <svg id="trafficChart" viewBox="0 0 600 120" preserveAspectRatio="none" role="img" aria-label="Upstream and downstream transfer rate history">
-            <path class="chart-grid" d="M0 30H600M0 60H600M0 90H600"></path>
-            <path class="chart-line upstream-line" id="upstreamLine"></path>
-            <path class="chart-line downstream-line" id="downstreamLine"></path>
-          </svg>
-          <span>120 SECOND WINDOW</span>
-        </div>
-      </section>
-
-      <section class="workspace">
+      <section class="primary-grid">
         <article class="panel traffic-panel">
           <div class="panel-heading">
-            <div><p class="eyebrow">LIVE MUTATION</p><h2>Traffic policy</h2></div>
-            <span class="unsaved" id="unsavedBadge">SYNCED</span>
+            <div><span class="section-label">Controls</span><h2>Traffic policy</h2></div>
+            <span class="unsaved" id="unsavedBadge">Saved</span>
           </div>
-          <div class="direction-tabs" role="tablist">
-            <button class="tab active" data-direction="upstream" role="tab">↑ UPSTREAM</button>
-            <button class="tab" data-direction="downstream" role="tab">↓ DOWNSTREAM</button>
+          <div class="direction-tabs" role="tablist" aria-label="Traffic direction">
+            <button class="tab active" data-direction="upstream" role="tab">Client to upstream</button>
+            <button class="tab" data-direction="downstream" role="tab">Upstream to client</button>
           </div>
           <form id="policyForm">
-            <label>
-              <span><b>Latency</b><output id="latencyOutput">0 ms</output></span>
-              <input id="latency" name="latency_ms" type="range" min="0" max="5000" step="10" />
-              <small>Base delay applied to every chunk</small>
+            <label class="policy-row">
+              <span class="policy-copy"><b>Latency</b><small>Fixed delay for each forwarded chunk</small></span>
+              <span class="value-field"><input id="latency" data-policy name="latency_ms" type="number" inputmode="numeric" min="0" max="5000" step="1" required /><span>ms</span></span>
             </label>
-            <label>
-              <span><b>Jitter</b><output id="jitterOutput">0 ms</output></span>
-              <input id="jitter" name="jitter_ms" type="range" min="0" max="2000" step="5" />
-              <small>Deterministic variance around latency</small>
+            <label class="policy-row">
+              <span class="policy-copy"><b>Jitter</b><small>Deterministic variance around latency</small></span>
+              <span class="value-field"><input id="jitter" data-policy name="jitter_ms" type="number" inputmode="numeric" min="0" max="2000" step="1" required /><span>ms</span></span>
             </label>
-            <label>
-              <span><b>Bandwidth ceiling</b><output id="bandwidthOutput">Unlimited</output></span>
-              <input id="bandwidth" name="bandwidth_kbps" type="range" min="0" max="100000" step="100" />
-              <small>0 means the limiter is bypassed</small>
+            <label class="policy-row">
+              <span class="policy-copy"><b>Bandwidth</b><small>Transfer ceiling, 0 disables the limiter</small></span>
+              <span class="value-field"><input id="bandwidth" data-policy name="bandwidth_kbps" type="number" inputmode="numeric" min="0" max="100000" step="1" required /><span>kbps</span></span>
             </label>
-            <button class="apply-button" type="submit"><span>APPLY TO LIVE RUN</span><b>↗</b></button>
+            <button class="apply-button" type="submit">Apply policy</button>
           </form>
           <p class="form-message" id="formMessage" role="status"></p>
         </article>
 
+        <div class="telemetry-stack">
+          <section class="panel route-panel">
+            <div class="panel-heading"><div><span class="section-label">Network</span><h2>Proxy route</h2></div></div>
+            <div class="signal-path">
+              <div><span>Client</span><strong>external traffic</strong></div><i aria-hidden="true">→</i>
+              <div class="fault-node"><span>Listen</span><strong id="listenEndpoint">-</strong></div><i aria-hidden="true">→</i>
+              <div><span>Upstream</span><strong id="upstreamEndpoint">-</strong></div>
+            </div>
+          </section>
+
+          <section class="panel pulse-panel">
+            <div class="panel-heading">
+              <div><span class="section-label">Last 120 seconds</span><h2>Traffic rate</h2></div>
+              <div class="rate-legend"><span class="upstream-rate">↑ <b id="upstreamRate">0 B/s</b></span><span class="downstream-rate">↓ <b id="downstreamRate">0 B/s</b></span></div>
+            </div>
+            <div class="chart-wrap">
+              <svg id="trafficChart" viewBox="0 0 600 120" preserveAspectRatio="none" role="img" aria-label="Upstream and downstream transfer rate history">
+                <path class="chart-grid" d="M0 30H600M0 60H600M0 90H600"></path>
+                <path class="chart-line upstream-line" id="upstreamLine"></path>
+                <path class="chart-line downstream-line" id="downstreamLine"></path>
+              </svg>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="secondary-grid">
         <article class="panel stage-panel">
           <div class="panel-heading">
-            <div><p class="eyebrow">SCENARIO SEQUENCE</p><h2>Fault stages</h2></div>
-            <span class="stage-count" id="stageCount">0 STAGES</span>
+            <div><span class="section-label">Scenario</span><h2>Stages</h2></div>
+            <span class="stage-count" id="stageCount">0 stages</span>
           </div>
-          <p class="stage-note">Each connection starts its own stage timeline when accepted.</p>
-          <div class="stage-list" id="stageList">
-            <div class="empty-state"><span>⌁</span><p>No stage data yet</p></div>
+          <p class="stage-note">Each connection follows its own stage timeline.</p>
+          <div class="stage-list" id="stageList"><div class="empty-state">No stage data</div></div>
+        </article>
+
+        <article class="panel events-panel">
+          <div class="panel-heading">
+            <div><span class="section-label">History</span><h2>Events</h2></div>
+            <span class="event-cursor" id="eventCursor">No events</span>
           </div>
+          <div class="event-list" id="eventList"><div class="empty-event">No events recorded</div></div>
         </article>
       </section>
 
-      <section class="panel events-panel">
-        <div class="panel-heading">
-          <div><p class="eyebrow">DISRUPTION HISTORY</p><h2>Event stream</h2></div>
-          <span class="event-cursor" id="eventCursor">WAITING</span>
-        </div>
-        <div class="event-list" id="eventList">
-          <div class="empty-event">No events recorded</div>
-        </div>
-      </section>
-
-      <section class="panel endpoint-panel">
-        <div><p class="eyebrow">ROUTING</p><h2>Signal path</h2></div>
-        <div class="signal-path">
-          <div><span>CLIENT</span><strong>External traffic</strong></div><i>→</i>
-          <div class="fault-node"><span>FAULTLINE</span><strong id="listenEndpoint">-</strong></div><i>→</i>
-          <div><span>UPSTREAM</span><strong id="upstreamEndpoint">-</strong></div>
-        </div>
-        <button class="shutdown-button" id="shutdownButton">STOP RUN</button>
-      </section>
+      <footer class="footer-bar"><span>Faultline control API</span><button class="shutdown-button" id="shutdownButton">Stop process</button></footer>
     </main>
 
     <dialog id="settingsDialog">
       <form method="dialog" id="settingsForm">
-        <div class="dialog-heading"><div><p class="eyebrow">CONNECTION</p><h2>Control endpoint</h2></div><button value="cancel" aria-label="Close">×</button></div>
-        <label><span>Base URL</span><input id="baseUrl" type="url" placeholder="http://127.0.0.1:9090" required /></label>
+        <div class="dialog-heading"><div><span class="section-label">Connection</span><h2>Control API</h2></div><button id="settingsClose" type="button" aria-label="Close">×</button></div>
+        <label><span>Base URL</span><input id="baseUrl" type="text" inputmode="url" placeholder="http://127.0.0.1:9090" required /></label>
         <label><span>Bearer token</span><input id="authToken" type="password" autocomplete="off" placeholder="Optional" /></label>
-        <p>Credentials stay in this browser and are sent only to the endpoint above.</p>
-        <button class="apply-button" value="default" type="submit"><span>SAVE & CONNECT</span><b>↗</b></button>
+        <p>Settings are stored only in this browser.</p>
+        <button class="apply-button" value="default" type="submit">Save connection</button>
       </form>
     </dialog>
 
-    <script src="./runtime-config.js"></script>
-    <script type="module" src="./app.js"></script>
+    <script src="./runtime-config.js?v=0.1.0"></script>
+    <script type="module" src="./app.js?v=0.1.0"></script>
   </body>
 </html>

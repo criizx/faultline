@@ -39,3 +39,13 @@ jobs:
         run: scripts/verify.sh
       - name: Check example scenario
         run: ./.build/checks/faultline check --config examples/unstable-api.conf
+
+  docker-smoke:
+    name: Docker demo smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Run Docker smoke test
+        run: scripts/test-docker.sh

@@ -23,6 +23,7 @@ let eventHistoryTruncated = false
 const drafts = { upstream: null, downstream: null }
 
 const byId = id => document.getElementById(id)
+if (runtime.forceBaseUrl) byId("settingsButton").hidden = true
 const formatBytes = value => {
   if (value < 1024) return `${Math.round(value)} B`
   if (value < 1048576) return `${(value / 1024).toFixed(1)} KB`
@@ -35,7 +36,7 @@ const formatDuration = value => {
   const minutes = String(Math.floor((seconds % 3600) / 60)).padStart(2, "0")
   return `${hours}:${minutes}:${String(seconds % 60).padStart(2, "0")}`
 }
-const formatStageDuration = value => value === 0 ? "UNTIL STOP" : value < 1000 ? `${value} MS` : `${value / 1000} SEC`
+const formatStageDuration = value => value === 0 ? "until stopped" : value < 1000 ? `${value} ms` : `${value / 1000} s`
 const headers = extra => ({ ...(connection.token ? { Authorization: `Bearer ${connection.token}` } : {}), ...extra })
 
 function recordSample(metrics, runId) {
@@ -79,18 +80,18 @@ function renderHistory() {
 }
 
 const eventLabels = {
-  proxy_started: "PROXY STARTED",
-  proxy_stopped: "PROXY STOPPED",
-  connection_open: "CONNECTION OPEN",
-  connection_close: "CONNECTION CLOSED",
-  connection_error: "CONNECTION ERROR",
-  connection_reset: "CONNECTION RESET",
-  connection_timeout: "CONNECTION TIMEOUT",
-  connection_rejected: "CONNECTION REJECTED",
-  stage_transition: "STAGE TRANSITION",
-  blackout_entry: "BLACKOUT ENTRY",
-  policy_update: "POLICY UPDATED",
-  shutdown_requested: "SHUTDOWN REQUESTED"
+  proxy_started: "Proxy started",
+  proxy_stopped: "Proxy stopped",
+  connection_open: "Connection opened",
+  connection_close: "Connection closed",
+  connection_error: "Connection error",
+  connection_reset: "Connection reset",
+  connection_timeout: "Connection timeout",
+  connection_rejected: "Connection rejected",
+  stage_transition: "Stage changed",
+  blackout_entry: "Blackout started",
+  policy_update: "Policy updated",
+  shutdown_requested: "Shutdown requested"
 }
 
 function eventTone(event) {
@@ -100,7 +101,7 @@ function eventTone(event) {
 }
 
 function renderEvents() {
-  byId("eventCursor").textContent = eventHistoryTruncated ? "HISTORY GAP" : eventCursor ? `SEQ ${eventCursor}` : "WAITING"
+  byId("eventCursor").textContent = eventHistoryTruncated ? "History gap" : eventCursor ? `seq ${eventCursor}` : "No events"
   byId("eventCursor").classList.toggle("warning", eventHistoryTruncated)
   if (!eventHistory.length) {
     byId("eventList").innerHTML = '<div class="empty-event">No events recorded</div>'
@@ -113,7 +114,7 @@ function renderEvents() {
       second: "2-digit",
       fractionalSecondDigits: 3
     })
-    const connectionLabel = event.connection_id ? `CONNECTION ${event.connection_id}` : "RUN"
+    const connectionLabel = event.connection_id ? `connection ${event.connection_id}` : "run"
     const detail = event.detail ? `${connectionLabel} · ${event.detail}` : connectionLabel
     return `<div class="event-row ${eventTone(event.event)}">
       <time>${escapeHtml(time)}</time>
@@ -163,23 +164,15 @@ function renderPolicy() {
   byId("latency").value = policy.latency_ms
   byId("jitter").value = policy.jitter_ms
   byId("bandwidth").value = policy.bandwidth_kbps
-  renderOutputs()
   const dirty = drafts[direction] !== null
-  byId("unsavedBadge").textContent = dirty ? "UNAPPLIED" : "SYNCED"
+  byId("unsavedBadge").textContent = dirty ? "Unsaved" : "Saved"
   byId("unsavedBadge").classList.toggle("dirty", dirty)
 }
 
-function renderOutputs() {
-  byId("latencyOutput").textContent = `${byId("latency").value} ms`
-  byId("jitterOutput").textContent = `${byId("jitter").value} ms`
-  const bandwidth = Number(byId("bandwidth").value)
-  byId("bandwidthOutput").textContent = bandwidth === 0 ? "Unlimited" : `${bandwidth.toLocaleString()} kbps`
-}
-
 function renderStages(stages, connections) {
-  byId("stageCount").textContent = `${stages.length} ${stages.length === 1 ? "STAGE" : "STAGES"}`
+  byId("stageCount").textContent = `${stages.length} ${stages.length === 1 ? "stage" : "stages"}`
   if (!stages.length) {
-    byId("stageList").innerHTML = '<div class="empty-state"><span>⌁</span><p>Static policy · no stage sequence</p></div>'
+    byId("stageList").innerHTML = '<div class="empty-state">Static policy, no stages</div>'
     return
   }
   byId("stageList").innerHTML = stages.map((stage, index) => {
@@ -194,7 +187,7 @@ function renderStages(stages, connections) {
     return `
     <div class="stage ${active.length ? "active-stage" : ""}">
       <span class="stage-index">${index + 1}</span>
-      <div><h3>${escapeHtml(stage.name)}${active.length ? `<em>${active.length} ACTIVE · ${progressLabel}</em>` : ""}</h3><p>↑ ${stage.upstream.latency_ms}ms · ${stage.upstream.bandwidth_kbps || "∞"}kbps<br>↓ ${stage.downstream.latency_ms}ms · ${stage.downstream.bandwidth_kbps || "∞"}kbps · reset ${(stage.reset_probability * 100).toFixed(1)}%</p>${active.length && stage.duration_ms !== 0 ? `<span class="stage-progress"><i style="left:${progressStart.toFixed(1)}%;width:${progressWidth.toFixed(1)}%"></i></span>` : ""}</div>
+      <div><h3>${escapeHtml(stage.name)}${active.length ? `<em>${active.length} active, ${progressLabel}</em>` : ""}</h3><p>↑ ${stage.upstream.latency_ms} ms, ${stage.upstream.bandwidth_kbps || "∞"} kbps<br>↓ ${stage.downstream.latency_ms} ms, ${stage.downstream.bandwidth_kbps || "∞"} kbps, reset ${(stage.reset_probability * 100).toFixed(1)}%</p>${active.length && stage.duration_ms !== 0 ? `<span class="stage-progress"><i style="left:${progressStart.toFixed(1)}%;width:${progressWidth.toFixed(1)}%"></i></span>` : ""}</div>
       <span class="stage-duration">${formatStageDuration(stage.duration_ms)}</span>
     </div>`
   }).join("")
@@ -210,7 +203,7 @@ function render(next) {
   state = next
   const { scenario, metrics, lifecycle } = next
   recordSample(metrics, lifecycle.run_id)
-  byId("scenarioName").innerHTML = `${escapeHtml(scenario.name)}<span>.</span>`
+  byId("scenarioName").textContent = scenario.name
   byId("experimentId").textContent = lifecycle.experiment_id || "unassigned"
   byId("runId").textContent = lifecycle.run_id || "-"
   byId("uptime").textContent = formatDuration(lifecycle.uptime_ms)
@@ -225,7 +218,7 @@ function render(next) {
   renderStages(scenario.stages, next.connections || [])
   renderHistory()
   renderPolicy()
-  setConnectionStatus("online", lifecycle.status.toUpperCase())
+  setConnectionStatus("online", lifecycle.status)
 }
 
 async function poll() {
@@ -236,7 +229,7 @@ async function poll() {
     render(next)
     await updateEvents(next.lifecycle.run_id)
   } catch (error) {
-    setConnectionStatus("offline", "OFFLINE")
+    setConnectionStatus("offline", "offline")
     byId("formMessage").textContent = `Control API unavailable: ${error.message}`
     byId("formMessage").className = "form-message error"
   } finally {
@@ -250,14 +243,11 @@ document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", (
   renderPolicy()
 }))
 
-document.querySelectorAll('input[type="range"]').forEach(input => input.addEventListener("input", () => {
-  renderOutputs()
-  drafts[direction] = {
-    latency_ms: Number(byId("latency").value),
-    jitter_ms: Number(byId("jitter").value),
-    bandwidth_kbps: Number(byId("bandwidth").value)
-  }
-  renderPolicy()
+document.querySelectorAll("input[data-policy]").forEach(input => input.addEventListener("input", () => {
+  const values = [byId("latency").value, byId("jitter").value, byId("bandwidth").value]
+  drafts[direction] = { latency_ms: values[0], jitter_ms: values[1], bandwidth_kbps: values[2] }
+  byId("unsavedBadge").textContent = "Unsaved"
+  byId("unsavedBadge").classList.add("dirty")
 }))
 
 byId("policyForm").addEventListener("submit", async event => {
@@ -287,6 +277,8 @@ byId("settingsButton").addEventListener("click", () => {
   byId("settingsDialog").showModal()
 })
 
+byId("settingsClose").addEventListener("click", () => byId("settingsDialog").close())
+
 byId("settingsForm").addEventListener("submit", event => {
   event.preventDefault()
   connection.baseUrl = byId("baseUrl").value.replace(/\/$/, "")
@@ -300,7 +292,7 @@ byId("shutdownButton").addEventListener("click", async () => {
   if (!window.confirm("Stop the active Faultline run? Existing connections will close.")) return
   try {
     await request("/v1/shutdown", { method: "POST", headers: { "X-Faultline-Confirm": "shutdown" } })
-    setConnectionStatus("", "STOPPING")
+    setConnectionStatus("", "stopping")
   } catch (error) {
     window.alert(`Shutdown failed: ${error.message}`)
   }

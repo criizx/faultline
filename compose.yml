@@ -6,10 +6,16 @@ services:
       FAULTLINE_EXPERIMENT_ID: ${FAULTLINE_EXPERIMENT_ID:-local-compose}
       FAULTLINE_UPSTREAM_HOST: ${FAULTLINE_UPSTREAM_HOST:-host.docker.internal}
       FAULTLINE_UPSTREAM_PORT: ${FAULTLINE_UPSTREAM_PORT:-3000}
+      FAULTLINE_UPSTREAM_LATENCY_MS: ${FAULTLINE_UPSTREAM_LATENCY_MS:-0}
+      FAULTLINE_UPSTREAM_JITTER_MS: ${FAULTLINE_UPSTREAM_JITTER_MS:-0}
+      FAULTLINE_UPSTREAM_BANDWIDTH_KBPS: ${FAULTLINE_UPSTREAM_BANDWIDTH_KBPS:-0}
+      FAULTLINE_DOWNSTREAM_LATENCY_MS: ${FAULTLINE_DOWNSTREAM_LATENCY_MS:-0}
+      FAULTLINE_DOWNSTREAM_JITTER_MS: ${FAULTLINE_DOWNSTREAM_JITTER_MS:-0}
+      FAULTLINE_DOWNSTREAM_BANDWIDTH_KBPS: ${FAULTLINE_DOWNSTREAM_BANDWIDTH_KBPS:-0}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./scripts/docker-entrypoint.sh:/runtime/docker-entrypoint.sh:ro
 
@@ -18,7 +24,7 @@ services:
     depends_on:
       - faultline
     ports:
-      - "4173:80"
+      - "127.0.0.1:4173:80"
     volumes:
       - ./ui:/usr/share/nginx/html:ro
       - ./demo/nginx.conf:/etc/nginx/conf.d/default.conf:ro
