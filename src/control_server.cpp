@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <fcntl.h>
 #include <memory>
@@ -182,6 +183,12 @@ struct PolicyUpdate
     DirectionPolicy policy;
 };
 
+struct EventsQuery
+{
+    std::uint64_t after_sequence{};
+    std::size_t limit{100};
+};
+
 std::string json_escape(std::string_view value)
 {
     std::ostringstream out;
@@ -254,6 +261,56 @@ std::uint32_t parse_u32(std::string_view value)
     const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
     if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size())
         throw std::runtime_error("invalid policy value");
+    return result;
+}
+
+std::uint64_t parse_u64(std::string_view value)
+{
+    std::uint64_t result{};
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
+    if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size())
+        throw std::runtime_error("invalid event query value");
+    return result;
+}
+
+EventsQuery parse_events_query(std::string_view target)
+{
+    if (target == "/v1/events")
+        return {};
+    constexpr std::string_view prefix = "/v1/events?";
+    if (!target.starts_with(prefix) || target.size() == prefix.size())
+        throw std::runtime_error("invalid events query");
+    EventsQuery result;
+    bool after_seen = false;
+    bool limit_seen = false;
+    auto query = target.substr(prefix.size());
+    while (!query.empty())
+    {
+        const auto separator = query.find('&');
+        const auto pair = query.substr(0, separator);
+        const auto equals = pair.find('=');
+        if (equals == std::string_view::npos || equals == 0 || equals + 1 == pair.size())
+            throw std::runtime_error("invalid events query");
+        const auto key = pair.substr(0, equals);
+        const auto value = parse_u64(pair.substr(equals + 1));
+        if (key == "after" && !after_seen)
+        {
+            result.after_sequence = value;
+            after_seen = true;
+        }
+        else if (key == "limit" && !limit_seen && value >= 1 && value <= 500)
+        {
+            result.limit = static_cast<std::size_t>(value);
+            limit_seen = true;
+        }
+        else
+        {
+            throw std::runtime_error("unknown, duplicate, or out-of-range events query key");
+        }
+        if (separator == std::string_view::npos)
+            break;
+        query.remove_prefix(separator + 1);
+    }
     return result;
 }
 
@@ -420,7 +477,7 @@ struct ControlServer::Impl
         {
             if (!confirmed(request, "shutdown"))
                 return response(403, "Forbidden", "{\"error\":\"confirmation_required\"}", true);
-            proxy.request_stop();
+            proxy.request_shutdown();
             return response(202, "Accepted", "{\"status\":\"stopping\"}", true);
         }
         if (request.method == "PUT" && request.target.rfind("/v1/policies/", 0) == 0)
@@ -444,6 +501,11 @@ struct ControlServer::Impl
             return response(200, "OK", proxy.lifecycle_json(), true);
         if (request.target == "/v1/connections")
             return response(200, "OK", proxy.connections_json(), true);
+        if (request.target == "/v1/events" || request.target.starts_with("/v1/events?"))
+        {
+            const auto query = parse_events_query(request.target);
+            return response(200, "OK", proxy.events_json(query.after_sequence, query.limit), true);
+        }
         if (request.target == "/v1/state")
             return response(200, "OK",
                             "{\"scenario\":" + scenario_json(proxy.scenario_snapshot()) +

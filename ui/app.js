@@ -16,6 +16,10 @@ let direction = "upstream"
 let polling = false
 let history = []
 let lastSample = null
+let eventHistory = []
+let eventCursor = 0
+let eventRunId = null
+let eventHistoryTruncated = false
 const drafts = { upstream: null, downstream: null }
 
 const byId = id => document.getElementById(id)
@@ -72,6 +76,70 @@ function renderHistory() {
   byId("downstreamRate").textContent = `${formatBytes(latest.downstream)}/s`
   byId("upstreamLine").setAttribute("d", chartPath("upstream", maximum, now))
   byId("downstreamLine").setAttribute("d", chartPath("downstream", maximum, now))
+}
+
+const eventLabels = {
+  proxy_started: "PROXY STARTED",
+  proxy_stopped: "PROXY STOPPED",
+  connection_open: "CONNECTION OPEN",
+  connection_close: "CONNECTION CLOSED",
+  connection_error: "CONNECTION ERROR",
+  connection_reset: "CONNECTION RESET",
+  connection_timeout: "CONNECTION TIMEOUT",
+  connection_rejected: "CONNECTION REJECTED",
+  stage_transition: "STAGE TRANSITION",
+  blackout_entry: "BLACKOUT ENTRY",
+  policy_update: "POLICY UPDATED",
+  shutdown_requested: "SHUTDOWN REQUESTED"
+}
+
+function eventTone(event) {
+  if (["connection_reset", "connection_timeout", "connection_error", "connection_rejected"].includes(event)) return "danger"
+  if (["blackout_entry", "stage_transition", "policy_update"].includes(event)) return "warning"
+  return "neutral"
+}
+
+function renderEvents() {
+  byId("eventCursor").textContent = eventHistoryTruncated ? "HISTORY GAP" : eventCursor ? `SEQ ${eventCursor}` : "WAITING"
+  byId("eventCursor").classList.toggle("warning", eventHistoryTruncated)
+  if (!eventHistory.length) {
+    byId("eventList").innerHTML = '<div class="empty-event">No events recorded</div>'
+    return
+  }
+  byId("eventList").innerHTML = [...eventHistory].reverse().map(event => {
+    const time = new Date(event.timestamp_unix_ms).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      fractionalSecondDigits: 3
+    })
+    const connectionLabel = event.connection_id ? `CONNECTION ${event.connection_id}` : "RUN"
+    const detail = event.detail ? `${connectionLabel} · ${event.detail}` : connectionLabel
+    return `<div class="event-row ${eventTone(event.event)}">
+      <time>${escapeHtml(time)}</time>
+      <i></i>
+      <div><strong>${escapeHtml(eventLabels[event.event] || event.event.toUpperCase())}</strong><span>${escapeHtml(detail)}</span></div>
+      <code>#${event.sequence}</code>
+    </div>`
+  }).join("")
+}
+
+async function updateEvents(runId) {
+  if (eventRunId !== runId) {
+    eventHistory = []
+    eventCursor = 0
+    eventRunId = runId
+    eventHistoryTruncated = false
+  }
+  const page = await request(`/v1/events?after=${eventCursor}&limit=100`)
+  if (page.truncated) {
+    eventHistory = []
+    eventHistoryTruncated = true
+  }
+  eventHistory.push(...page.events)
+  eventHistory = eventHistory.slice(-100)
+  eventCursor = page.next_after
+  renderEvents()
 }
 
 async function request(path, options = {}) {
@@ -164,7 +232,9 @@ async function poll() {
   if (polling) return
   polling = true
   try {
-    render(await request("/v1/state"))
+    const next = await request("/v1/state")
+    render(next)
+    await updateEvents(next.lifecycle.run_id)
   } catch (error) {
     setConnectionStatus("offline", "OFFLINE")
     byId("formMessage").textContent = `Control API unavailable: ${error.message}`

@@ -2,7 +2,9 @@
 #include "faultline/control_server.hpp"
 #include "faultline/proxy.hpp"
 
+#include <algorithm>
 #include <arpa/inet.h>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -364,6 +366,51 @@ void test_proxy_round_trip_and_latency()
     require(metrics.delayed_chunks >= 2, "delayed chunk metric mismatch");
 }
 
+void test_latency_deadline_accuracy()
+{
+    const int upstream_port = free_port();
+    const int proxy_port = free_port();
+    EchoServer echo(upstream_port);
+    faultline::Scenario scenario;
+    scenario.name = "latency-accuracy";
+    scenario.listen_port = static_cast<std::uint16_t>(proxy_port);
+    scenario.upstream_port = static_cast<std::uint16_t>(upstream_port);
+    scenario.idle_timeout_ms = 2'000;
+    std::ostringstream logs;
+    faultline::ProxyServer proxy(scenario, logs);
+    std::jthread proxy_thread([&proxy](const std::stop_token &token) { proxy.run(token); });
+    const int client = connect_local(proxy_port);
+    timeval timeout{3, 0};
+    ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    auto exchange = [client](char value) {
+        const auto started = std::chrono::steady_clock::now();
+        require(::send(client, &value, 1, 0) == 1, "latency accuracy send failed");
+        char response{};
+        require(::recv(client, &response, 1, 0) == 1 && response == value, "latency accuracy receive failed");
+        return std::chrono::steady_clock::now() - started;
+    };
+
+    (void)exchange('w');
+    std::array<std::chrono::steady_clock::duration, 7> baseline{};
+    for (auto &sample : baseline)
+        sample = exchange('b');
+    proxy.update_policy(faultline::TrafficDirection::Upstream, {5, 0, 0});
+    proxy.update_policy(faultline::TrafficDirection::Downstream, {5, 0, 0});
+    std::array<std::chrono::steady_clock::duration, 7> delayed{};
+    for (auto &sample : delayed)
+        sample = exchange('d');
+    std::ranges::sort(baseline);
+    std::ranges::sort(delayed);
+    const auto injected = delayed[3] - baseline[3];
+
+    ::close(client);
+    proxy.request_stop();
+    proxy_thread.request_stop();
+    require(injected >= 8ms, "configured latency was not applied accurately");
+    require(injected < 18ms, "latency scheduler overslept its deadline");
+}
+
 void test_staged_runtime()
 {
     const int upstream_port = free_port();
@@ -719,6 +766,31 @@ void test_control_api()
     require(current.upstream.bandwidth_kbps == 321, "runtime bandwidth update mismatch");
     require(proxy.metrics().snapshot().policy_updates == 1, "policy update metric mismatch");
 
+    const auto events =
+        http_request(scenario.control_port, "GET /v1/events?after=0&limit=1 HTTP/1.1\r\nHost: localhost\r\n"
+                                            "Authorization: Bearer control-test-token\r\n\r\n");
+    require(events.contains("200 OK"), "events endpoint failed");
+    require(events.contains("\"event\":\"policy_update\""), "policy update event missing");
+    require(events.contains("\"detail\":\"upstream latency_ms=77 jitter_ms=9 bandwidth_kbps=321\""),
+            "policy update values missing");
+    require(events.contains("\"experiment_id\":\"control-api-test\""), "event experiment identity missing");
+    require(events.contains("\"run_id\":\""), "event run identity missing");
+    require(events.contains("\"truncated\":false"), "fresh event cursor was marked truncated");
+    const auto next_after = json_u64(events, "next_after");
+    require(next_after > 0, "events cursor did not advance");
+
+    const auto no_new_events =
+        http_request(scenario.control_port,
+                     "GET /v1/events?after=" + std::to_string(next_after) +
+                         "&limit=1 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer control-test-token\r\n\r\n");
+    require(no_new_events.contains("200 OK"), "events continuation failed");
+    require(no_new_events.contains("\"events\":[]"), "events cursor returned duplicate records");
+
+    const auto invalid_events =
+        http_request(scenario.control_port, "GET /v1/events?limit=0 HTTP/1.1\r\nHost: localhost\r\n"
+                                            "Authorization: Bearer control-test-token\r\n\r\n");
+    require(invalid_events.contains("400 Bad Request"), "invalid event limit was accepted");
+
     const auto invalid_update =
         http_request(scenario.control_port, "PUT /v1/policies/upstream?latency_ms=10&latency_ms=20 HTTP/1.1\r\n"
                                             "Host: localhost\r\nAuthorization: Bearer control-test-token\r\n"
@@ -759,6 +831,7 @@ void test_control_api()
                                             "Authorization: Bearer control-test-token\r\n"
                                             "X-Faultline-Confirm: shutdown\r\nContent-Length: 0\r\n\r\n");
     require(accepted.find("202 Accepted") != std::string::npos, "confirmed shutdown failed");
+    require(proxy.events_json(0, 100).contains("\"event\":\"shutdown_requested\""), "confirmed shutdown event missing");
     control.request_stop();
     control_thread.request_stop();
     control_thread.join();
@@ -807,6 +880,29 @@ void test_live_policy_update_on_open_connection()
     require(elapsed >= 85ms, "updated policy did not affect the open connection");
 }
 
+void test_event_history_is_bounded()
+{
+    faultline::Scenario scenario;
+    scenario.name = "event-history";
+    scenario.experiment_id = "event-history-test";
+    std::ostringstream logs;
+    faultline::ProxyServer proxy(scenario, logs);
+    for (std::size_t index = 0; index < 2'100; ++index)
+        proxy.update_policy(faultline::TrafficDirection::Upstream, {static_cast<std::uint32_t>(index % 100), 0, 0});
+
+    const auto events = proxy.events_json(0, 500);
+    require(events.contains("\"truncated\":true"), "expired event cursor was not marked truncated");
+    require(json_u64(events, "oldest_sequence") > 1, "event history did not evict old records");
+    require(json_u64(events, "latest_sequence") == 2'100, "event history latest sequence mismatch");
+    require(json_u64(events, "next_after") < json_u64(events, "latest_sequence"),
+            "limited event page consumed the complete history");
+
+    const auto tail = proxy.events_json(json_u64(events, "latest_sequence"), 100);
+    require(tail.contains("\"events\":[]"), "event tail cursor returned duplicate records");
+    require(tail.contains("\"truncated\":false"), "current event cursor was marked truncated");
+    require(logs.str().contains("\"run_id\":\""), "proxy event log run identity missing");
+}
+
 }
 
 int main(int argc, char **argv)
@@ -819,6 +915,7 @@ int main(int argc, char **argv)
             Test{"invalid_config", test_invalid_config},
             Test{"staged_config", test_staged_config},
             Test{"round_trip_and_latency", test_proxy_round_trip_and_latency},
+            Test{"latency_accuracy", test_latency_deadline_accuracy},
             Test{"staged_runtime", test_staged_runtime},
             Test{"forced_reset", test_forced_reset},
             Test{"initial_stage_reset", test_initial_stage_reset},
@@ -828,6 +925,7 @@ int main(int argc, char **argv)
             Test{"connection_limit", test_connection_limit_and_worker_reaping},
             Test{"connect_shutdown", test_connect_shutdown_is_bounded},
             Test{"control_api", test_control_api},
+            Test{"event_history", test_event_history_is_bounded},
             Test{"live_policy", test_live_policy_update_on_open_connection},
         };
         bool matched = argc == 1;

@@ -1,0 +1,55 @@
+name: Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_latency_error_ms:
+        description: Maximum absolute injected latency error in milliseconds
+        required: true
+        type: string
+      max_bandwidth_error_percent:
+        description: Maximum absolute bandwidth error percentage
+        required: true
+        type: string
+      min_proxy_mbps:
+        description: Minimum median no-fault proxy throughput in Mbps
+        required: true
+        type: string
+      min_connections_per_second:
+        description: Minimum sequential connection churn rate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes cmake jq ninja-build
+      - name: Run standard profile
+        run: scripts/run-benchmarks.sh standard > benchmark.jsonl
+      - name: Upload raw results
+        uses: actions/upload-artifact@v4
+        with:
+          name: faultline-benchmark
+          path: benchmark.jsonl
+      - name: Check explicit thresholds
+        env:
+          MAX_LATENCY_ERROR_MS: ${{ inputs.max_latency_error_ms }}
+          MAX_BANDWIDTH_ERROR_PERCENT: ${{ inputs.max_bandwidth_error_percent }}
+          MIN_PROXY_MBPS: ${{ inputs.min_proxy_mbps }}
+          MIN_CONNECTIONS_PER_SECOND: ${{ inputs.min_connections_per_second }}
+        run: |
+          scripts/check-benchmark-thresholds.sh benchmark.jsonl \
+            "$MAX_LATENCY_ERROR_MS" \
+            "$MAX_BANDWIDTH_ERROR_PERCENT" \
+            "$MIN_PROXY_MBPS" \
+            "$MIN_CONNECTIONS_PER_SECOND"

@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(FAULTLINE_BUILD_TESTS "Build Faultline tests" ON)
+option(FAULTLINE_BUILD_BENCHMARKS "Build Faultline benchmarks" OFF)
 option(FAULTLINE_ENABLE_SANITIZERS "Enable ASan and UBSan" OFF)
 
 add_library(faultline_core
@@ -24,6 +25,19 @@ target_compile_options(faultline_core PRIVATE
 if(FAULTLINE_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "AppleClang|Clang|GNU")
     target_compile_options(faultline_core PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
     target_link_options(faultline_core PUBLIC -fsanitize=address,undefined)
+endif()
+
+if(FAULTLINE_BUILD_BENCHMARKS)
+    add_executable(faultline_benchmarks benchmarks/benchmarks.cpp)
+    target_link_libraries(faultline_benchmarks PRIVATE Faultline::core)
+    target_compile_definitions(faultline_benchmarks PRIVATE
+        FAULTLINE_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
+        FAULTLINE_SYSTEM_PROCESSOR="${CMAKE_SYSTEM_PROCESSOR}"
+        FAULTLINE_VERSION="${PROJECT_VERSION}"
+    )
+    target_compile_options(faultline_benchmarks PRIVATE
+        $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wall;-Wextra;-Wpedantic;-Wconversion;-Wshadow>
+    )
 endif()
 
 find_package(Threads REQUIRED)
@@ -49,6 +63,7 @@ if(FAULTLINE_BUILD_TESTS)
         invalid_config
         staged_config
         round_trip_and_latency
+        latency_accuracy
         staged_runtime
         forced_reset
         initial_stage_reset
@@ -58,6 +73,7 @@ if(FAULTLINE_BUILD_TESTS)
         connection_limit
         connect_shutdown
         control_api
+        event_history
         live_policy
     )
         add_test(NAME ${test_name} COMMAND faultline_tests ${test_name})

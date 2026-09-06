@@ -91,11 +91,13 @@ class ProxyServer
 
     void run(const std::stop_token &stop_token = {});
     void request_stop() noexcept;
+    void request_shutdown();
     void update_policy(TrafficDirection direction, DirectionPolicy policy);
     [[nodiscard]] Scenario scenario_snapshot() const;
     [[nodiscard]] LifecycleSnapshot lifecycle_snapshot() const;
     [[nodiscard]] std::string lifecycle_json() const;
     [[nodiscard]] std::string connections_json() const;
+    [[nodiscard]] std::string events_json(std::uint64_t after_sequence, std::size_t limit) const;
     [[nodiscard]] const Metrics &metrics() const noexcept
     {
         return *metrics_;

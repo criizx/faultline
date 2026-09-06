@@ -341,8 +341,27 @@ struct ActiveConnectionState
     std::uint64_t stage_started_at_unix_ms{};
 };
 
+struct EventRecord
+{
+    std::uint64_t sequence{};
+    std::uint64_t timestamp_unix_ms{};
+    std::string event;
+    std::uint64_t connection_id{};
+    std::string detail;
+};
+
 constexpr std::size_t k_read_buffer_size = std::size_t{16} * 1024;
 constexpr std::size_t k_max_queued_bytes = std::size_t{4} * 1024 * 1024;
+constexpr std::size_t k_event_history_capacity = 2'048;
+constexpr int k_session_poll_timeout_ms = 10;
+
+int poll_timeout_for(const PipeState &pipe, Clock::time_point now, int current_timeout)
+{
+    if (pipe.queue.empty() || pipe.queue.front().ready_at <= now)
+        return current_timeout;
+    const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(pipe.queue.front().ready_at - now);
+    return std::min(current_timeout, static_cast<int>(remaining.count()));
+}
 
 }
 
@@ -381,6 +400,9 @@ struct ProxyServer::Impl
     std::vector<SessionWorker> sessions;
     mutable std::mutex connections_mutex;
     std::unordered_map<std::uint64_t, ActiveConnectionState> active_connections;
+    mutable std::mutex events_mutex;
+    std::deque<EventRecord> events;
+    std::uint64_t next_event_sequence{1};
     mutable std::mutex lifecycle_mutex;
     std::string run_id{make_run_id()};
     std::atomic<RunStatus> lifecycle_status{RunStatus::Created};
@@ -419,6 +441,14 @@ struct ProxyServer::Impl
     void set_status(RunStatus value) noexcept
     {
         lifecycle_status.store(value);
+    }
+
+    bool begin_stop() noexcept
+    {
+        if (stopping.exchange(true))
+            return false;
+        set_status(RunStatus::Stopping);
+        return true;
     }
 
     void register_connection(std::uint64_t connection_id)
@@ -520,23 +550,30 @@ struct ProxyServer::Impl
 
     void update_policy(TrafficDirection direction, DirectionPolicy policy)
     {
-        std::lock_guard lock(scenario_mutex);
-        auto updated = scenario;
-        if (direction == TrafficDirection::Upstream)
         {
-            updated.upstream = policy;
-            for (auto &stage : updated.stages)
-                stage.upstream = policy;
+            std::lock_guard lock(scenario_mutex);
+            auto updated = scenario;
+            if (direction == TrafficDirection::Upstream)
+            {
+                updated.upstream = policy;
+                for (auto &stage : updated.stages)
+                    stage.upstream = policy;
+            }
+            else
+            {
+                updated.downstream = policy;
+                for (auto &stage : updated.stages)
+                    stage.downstream = policy;
+            }
+            validate(updated);
+            scenario = std::move(updated);
         }
-        else
-        {
-            updated.downstream = policy;
-            for (auto &stage : updated.stages)
-                stage.downstream = policy;
-        }
-        validate(updated);
-        scenario = std::move(updated);
         metrics->policy_updates_.fetch_add(1);
+        std::ostringstream detail;
+        detail << (direction == TrafficDirection::Upstream ? "upstream" : "downstream")
+               << " latency_ms=" << policy.latency_ms << " jitter_ms=" << policy.jitter_ms
+               << " bandwidth_kbps=" << policy.bandwidth_kbps;
+        log("policy_update", 0, detail.str());
     }
 
     void log(std::string_view event, std::uint64_t connection_id, std::string_view detail_text = {})
@@ -546,13 +583,54 @@ struct ProxyServer::Impl
             std::lock_guard lock(scenario_mutex);
             experiment_id = scenario.experiment_id;
         }
+        const auto timestamp = unix_milliseconds();
+        {
+            std::lock_guard lock(events_mutex);
+            if (events.size() == k_event_history_capacity)
+                events.pop_front();
+            events.push_back(EventRecord{next_event_sequence++, timestamp, std::string(event), connection_id,
+                                         std::string(detail_text)});
+        }
         std::ostringstream line;
         line << "{\"event\":\"" << json_escape(event) << "\",\"experiment_id\":\"" << json_escape(experiment_id)
-             << "\",\"connection_id\":" << connection_id;
+             << "\",\"run_id\":\"" << json_escape(run_id) << "\",\"timestamp_unix_ms\":" << timestamp
+             << ",\"connection_id\":" << connection_id;
         if (!detail_text.empty())
             line << ",\"detail\":\"" << json_escape(detail_text) << '"';
         line << '}';
         detail::write_log_line(logs, line.str());
+    }
+
+    [[nodiscard]] std::string events_json(std::uint64_t after_sequence, std::size_t limit) const
+    {
+        const auto identity = lifecycle_snapshot();
+        std::lock_guard lock(events_mutex);
+        const auto oldest_sequence = events.empty() ? next_event_sequence : events.front().sequence;
+        const auto latest_sequence = next_event_sequence - 1;
+        const bool truncated = after_sequence < oldest_sequence - 1;
+        std::ostringstream out;
+        out << "{\"events\":[";
+        std::size_t emitted = 0;
+        std::uint64_t next_after = after_sequence;
+        for (const auto &record : events)
+        {
+            if (record.sequence <= after_sequence || emitted == limit)
+                continue;
+            if (emitted != 0)
+                out << ',';
+            out << "{\"sequence\":" << record.sequence << ",\"timestamp_unix_ms\":" << record.timestamp_unix_ms
+                << ",\"event\":\"" << json_escape(record.event) << "\",\"experiment_id\":\""
+                << json_escape(identity.experiment_id) << "\",\"run_id\":\"" << json_escape(identity.run_id)
+                << "\",\"connection_id\":" << record.connection_id;
+            if (!record.detail.empty())
+                out << ",\"detail\":\"" << json_escape(record.detail) << '"';
+            out << '}';
+            next_after = record.sequence;
+            ++emitted;
+        }
+        out << "],\"next_after\":" << next_after << ",\"oldest_sequence\":" << oldest_sequence
+            << ",\"latest_sequence\":" << latest_sequence << ",\"truncated\":" << (truncated ? "true" : "false") << '}';
+        return out.str();
     }
 
     [[nodiscard]] bool blackout_active(const RuntimeSnapshot &runtime, Clock::time_point now) const
@@ -793,7 +871,13 @@ struct ProxyServer::Impl
                     can_write(to_upstream, now))
                     fds[1].events |= POLLOUT;
 
-                const int status = ::poll(fds.data(), fds.size(), 10);
+                int poll_timeout = k_session_poll_timeout_ms;
+                if (!blackout)
+                {
+                    poll_timeout = poll_timeout_for(to_upstream, now, poll_timeout);
+                    poll_timeout = poll_timeout_for(to_downstream, now, poll_timeout);
+                }
+                const int status = ::poll(fds.data(), fds.size(), poll_timeout);
                 if (status < 0 && errno != EINTR)
                     throw std::runtime_error("session poll failed: " + std::string(std::strerror(errno)));
                 const auto after_poll = Clock::now();
@@ -917,10 +1001,14 @@ void ProxyServer::run(const std::stop_token &stop_token)
 void ProxyServer::request_stop() noexcept
 {
     if (const auto impl = impl_)
-    {
-        if (!impl->stopping.exchange(true))
-            impl->set_status(RunStatus::Stopping);
-    }
+        (void)impl->begin_stop();
+}
+
+void ProxyServer::request_shutdown()
+{
+    const auto impl = impl_;
+    if (impl->begin_stop())
+        impl->log("shutdown_requested", 0);
 }
 
 void ProxyServer::update_policy(TrafficDirection direction, DirectionPolicy policy)
@@ -957,6 +1045,12 @@ std::string ProxyServer::connections_json() const
 {
     const auto impl = impl_;
     return impl->connections_json();
+}
+
+std::string ProxyServer::events_json(std::uint64_t after_sequence, std::size_t limit) const
+{
+    const auto impl = impl_;
+    return impl->events_json(after_sequence, limit);
 }
 
 }

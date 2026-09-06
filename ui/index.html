@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0b0d0c" />
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
     <title>Faultline Control</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
@@ -100,6 +101,16 @@
             <div class="empty-state"><span>⌁</span><p>No stage data yet</p></div>
           </div>
         </article>
+      </section>
+
+      <section class="panel events-panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">DISRUPTION HISTORY</p><h2>Event stream</h2></div>
+          <span class="event-cursor" id="eventCursor">WAITING</span>
+        </div>
+        <div class="event-list" id="eventList">
+          <div class="empty-event">No events recorded</div>
+        </div>
       </section>
 
       <section class="panel endpoint-panel">

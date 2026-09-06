@@ -72,10 +72,13 @@ curl http://127.0.0.1:9090/v1/metrics
 curl http://127.0.0.1:9090/v1/scenario
 curl http://127.0.0.1:9090/v1/lifecycle
 curl http://127.0.0.1:9090/v1/connections
+curl 'http://127.0.0.1:9090/v1/events?after=0&limit=100'
 curl http://127.0.0.1:9090/v1/state
 ```
 
 `/v1/connections` returns connecting sessions plus the current stage and stage elapsed time for every active proxied connection. The dashboard uses this data to display per-stage activity and progress without assuming that all connections share one global timeline.
+
+`/v1/events` returns a bounded cursor-based history of lifecycle, connection, stage, blackout, reset, timeout, rejection, error, and live policy events. Consumers retain `next_after` and send it as the next `after` value. A `truncated` response means the cursor fell behind the in-memory history and older events are no longer available.
 
 Start the local control dashboard:
 
@@ -179,9 +182,18 @@ Faultline currently works at the TCP byte-stream layer. It does not claim to sim
 ## Roadmap
 
 - UDP and Linux transparent modes;
-- reproducible performance benchmarks;
-- Militantyx experiment correlation;
-- web laboratory after the core API is stable.
+- packaged Militantyx integration adapters;
+- packaged dashboard distribution and deeper disruption analytics.
+
+## Benchmarks
+
+Run the isolated Release benchmark suite with:
+
+```bash
+scripts/run-benchmarks.sh
+```
+
+Use `scripts/run-benchmarks.sh smoke` for a shorter harness check. Results are emitted as JSON Lines and cover latency accuracy, bandwidth accuracy, no-fault proxy overhead and process CPU time, and short-connection churn. Benchmarks are intentionally separate from the normal tests and make no universal performance claim. See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for the output contract and comparison limits.
 
 ## License
 
