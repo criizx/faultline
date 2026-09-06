@@ -50,6 +50,11 @@ void require(bool condition, std::string_view message)
         throw std::runtime_error(std::string(message));
 }
 
+bool has_poll_event(short events, int event) noexcept
+{
+    return (static_cast<unsigned int>(static_cast<unsigned short>(events)) & static_cast<unsigned int>(event)) != 0U;
+}
+
 class Socket
 {
   public:
@@ -150,7 +155,7 @@ class EchoServer
         {
             pollfd descriptor{listener.get(), POLLIN, 0};
             const int status = ::poll(&descriptor, 1, 50);
-            if (status <= 0 || (descriptor.revents & POLLIN) == 0)
+            if (status <= 0 || !has_poll_event(descriptor.revents, POLLIN))
                 continue;
             Socket client(::accept(listener.get(), nullptr, nullptr));
             if (!client)

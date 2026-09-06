@@ -32,6 +32,11 @@ void require(bool condition, const std::string &message)
         throw std::runtime_error(message);
 }
 
+bool has_poll_event(short events, int event) noexcept
+{
+    return (static_cast<unsigned int>(static_cast<unsigned short>(events)) & static_cast<unsigned int>(event)) != 0U;
+}
+
 template <std::size_t Size> std::uint64_t json_u64(std::string_view json, const char (&key)[Size])
 {
     const auto prefix = '"' + std::string(key, Size - 1) + "\":";
@@ -107,7 +112,7 @@ class EchoServer
         {
             pollfd descriptor{listener_, POLLIN, 0};
             const int poll_status = ::poll(&descriptor, 1, 50);
-            if (poll_status <= 0 || (descriptor.revents & POLLIN) == 0)
+            if (poll_status <= 0 || !has_poll_event(descriptor.revents, POLLIN))
                 continue;
             client_ = ::accept(listener_, nullptr, nullptr);
             if (client_ < 0)
@@ -466,8 +471,8 @@ void test_staged_runtime()
     require(proxy.connections_json() == "[]", "completed connection remained in snapshot");
     require(second_elapsed < 100ms, "final stage policy was not activated");
     require(proxy.metrics().snapshot().stage_transitions > 0, "stage transition was not recorded");
-    require(logs.str().find("stage_transition") != std::string::npos, "stage transition was not logged");
-    require(logs.str().find("test-staged-runtime") != std::string::npos, "experiment id was not logged");
+    require(logs.str().contains("stage_transition"), "stage transition was not logged");
+    require(logs.str().contains("test-staged-runtime"), "experiment id was not logged");
 }
 
 void test_forced_reset()
@@ -707,26 +712,25 @@ void test_control_api()
     std::jthread control_thread([&control](const std::stop_token &token) { control.run(token); });
 
     const auto health = http_request(scenario.control_port, "GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    require(health.find("200 OK") != std::string::npos, "health endpoint failed: " + health);
-    require(health.find("{\"status\":\"ok\"}") != std::string::npos, "health response mismatch");
+    require(health.contains("200 OK"), "health endpoint failed: " + health);
+    require(health.contains("{\"status\":\"ok\"}"), "health response mismatch");
     require(!health.contains("\r\nX-Faultline-Experiment-ID:"), "health leaked experiment identity");
     require(!health.contains("\r\nX-Faultline-Run-ID:"), "health leaked run identity");
 
     const auto unauthenticated_state =
         http_request(scenario.control_port, "GET /v1/state HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    require(unauthenticated_state.find("401 Unauthorized") != std::string::npos,
-            "state endpoint bypassed authentication");
+    require(unauthenticated_state.contains("401 Unauthorized"), "state endpoint bypassed authentication");
     require(!unauthenticated_state.contains("\r\nX-Faultline-Experiment-ID:"),
             "unauthenticated response leaked experiment identity");
     require(!unauthenticated_state.contains("\r\nX-Faultline-Run-ID:"), "unauthenticated response leaked run identity");
 
     const auto state = http_request(scenario.control_port, "GET /v1/state HTTP/1.1\r\nHost: localhost\r\n"
                                                            "Authorization: Bearer control-test-token\r\n\r\n");
-    require(state.find("200 OK") != std::string::npos, "state endpoint failed: " + state + " logs: " + logs.str());
-    require(state.find("\"name\":\"control-api\"") != std::string::npos, "state scenario missing");
-    require(state.find("\"accepted_connections\":0") != std::string::npos, "state metrics missing");
-    require(state.find("\"lifecycle\":{") != std::string::npos, "state lifecycle missing");
-    require(state.find("\"run_id\":\"") != std::string::npos, "state run id missing");
+    require(state.contains("200 OK"), "state endpoint failed: " + state + " logs: " + logs.str());
+    require(state.contains("\"name\":\"control-api\""), "state scenario missing");
+    require(state.contains("\"accepted_connections\":0"), "state metrics missing");
+    require(state.contains("\"lifecycle\":{"), "state lifecycle missing");
+    require(state.contains("\"run_id\":\""), "state run id missing");
     require(state.contains("\"connections\":[]"), "state connections missing");
     require(state.contains("X-Faultline-Experiment-ID: control-api-test"), "experiment response header missing");
     require(state.contains("X-Faultline-Run-ID: "), "run response header missing");
@@ -736,13 +740,13 @@ void test_control_api()
     const auto preflight =
         http_request(scenario.control_port,
                      "OPTIONS /v1/state HTTP/1.1\r\nHost: localhost\r\nAccess-Control-Request-Method: GET\r\n\r\n");
-    require(preflight.find("204 No Content") != std::string::npos, "control preflight failed");
-    require(preflight.find("Access-Control-Allow-Origin: *") != std::string::npos, "control CORS header missing");
+    require(preflight.contains("204 No Content"), "control preflight failed");
+    require(preflight.contains("Access-Control-Allow-Origin: *"), "control CORS header missing");
 
     const auto lifecycle = http_request(scenario.control_port, "GET /v1/lifecycle HTTP/1.1\r\nHost: localhost\r\n"
                                                                "Authorization: Bearer control-test-token\r\n\r\n");
-    require(lifecycle.find("200 OK") != std::string::npos, "lifecycle endpoint failed");
-    require(lifecycle.find("\"status\":\"created\"") != std::string::npos, "lifecycle status mismatch");
+    require(lifecycle.contains("200 OK"), "lifecycle endpoint failed");
+    require(lifecycle.contains("\"status\":\"created\""), "lifecycle status mismatch");
 
     const auto connections = http_request(scenario.control_port, "GET /v1/connections HTTP/1.1\r\nHost: localhost\r\n"
                                                                  "Authorization: Bearer control-test-token\r\n\r\n");
@@ -752,14 +756,14 @@ void test_control_api()
     const auto rejected_update = http_request(
         scenario.control_port,
         "PUT /v1/policies/upstream?latency_ms=77 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
-    require(rejected_update.find("401 Unauthorized") != std::string::npos, "policy authentication was not enforced");
+    require(rejected_update.contains("401 Unauthorized"), "policy authentication was not enforced");
     require(proxy.scenario_snapshot().upstream.latency_ms == 0, "unconfirmed policy update was applied");
 
     const auto updated = http_request(
         scenario.control_port, "PUT /v1/policies/upstream?latency_ms=77&jitter_ms=9&bandwidth_kbps=321 HTTP/1.1\r\n"
                                "Host: localhost\r\nauthorization: Bearer control-test-token\r\n"
                                "x-faultline-confirm: update\r\nContent-Length: 0\r\n\r\n");
-    require(updated.find("200 OK") != std::string::npos, "policy update failed");
+    require(updated.contains("200 OK"), "policy update failed");
     const auto current = proxy.scenario_snapshot();
     require(current.upstream.latency_ms == 77, "runtime latency update mismatch");
     require(current.upstream.jitter_ms == 9, "runtime jitter update mismatch");
@@ -795,14 +799,14 @@ void test_control_api()
         http_request(scenario.control_port, "PUT /v1/policies/upstream?latency_ms=10&latency_ms=20 HTTP/1.1\r\n"
                                             "Host: localhost\r\nAuthorization: Bearer control-test-token\r\n"
                                             "X-Faultline-Confirm: update\r\nContent-Length: 0\r\n\r\n");
-    require(invalid_update.find("400 Bad Request") != std::string::npos, "duplicate policy key was accepted");
+    require(invalid_update.contains("400 Bad Request"), "duplicate policy key was accepted");
     require(proxy.scenario_snapshot().upstream.latency_ms == 77, "invalid update changed the runtime policy");
     require(proxy.metrics().snapshot().policy_updates == 1, "invalid update changed the policy metric");
 
     const auto forbidden =
         http_request(scenario.control_port, "POST /v1/shutdown HTTP/1.1\r\nHost: localhost\r\n"
                                             "Authorization: Bearer control-test-token\r\nContent-Length: 0\r\n\r\n");
-    require(forbidden.find("403 Forbidden") != std::string::npos, "shutdown confirmation was not enforced");
+    require(forbidden.contains("403 Forbidden"), "shutdown confirmation was not enforced");
 
     const int slow = connect_local(scenario.control_port);
     send_all(slow, "GET /healthz HTTP/1.1\r\n");
@@ -810,7 +814,7 @@ void test_control_api()
     const auto parallel_health =
         http_request(scenario.control_port, "GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");
     const auto parallel_elapsed = std::chrono::steady_clock::now() - parallel_started;
-    require(parallel_health.find("200 OK") != std::string::npos, "slow client blocked control API");
+    require(parallel_health.contains("200 OK"), "slow client blocked control API");
     require(parallel_elapsed < 500ms, "control API handled clients serially");
     ::close(slow);
 
@@ -821,24 +825,24 @@ void test_control_api()
     ::close(abandoned);
     std::this_thread::sleep_for(20ms);
     const auto after_abandon = http_request(scenario.control_port, "GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    require(after_abandon.find("200 OK") != std::string::npos, "abandoned client killed control API");
+    require(after_abandon.contains("200 OK"), "abandoned client killed control API");
 
     const auto escaped = http_request(scenario.control_port, "GET /bad\"target HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    require(escaped.find("404 Not Found") != std::string::npos, "unexpected target response");
+    require(escaped.contains("404 Not Found"), "unexpected target response");
 
     const auto accepted =
         http_request(scenario.control_port, "POST /v1/shutdown HTTP/1.1\r\nHost: localhost\r\n"
                                             "Authorization: Bearer control-test-token\r\n"
                                             "X-Faultline-Confirm: shutdown\r\nContent-Length: 0\r\n\r\n");
-    require(accepted.find("202 Accepted") != std::string::npos, "confirmed shutdown failed");
+    require(accepted.contains("202 Accepted"), "confirmed shutdown failed");
     require(proxy.events_json(0, 100).contains("\"event\":\"shutdown_requested\""), "confirmed shutdown event missing");
     control.request_stop();
     control_thread.request_stop();
     control_thread.join();
-    require(logs.str().find("bad\\\"target") != std::string::npos, "control log did not escape request target");
+    require(logs.str().contains("bad\\\"target"), "control log did not escape request target");
     require(logs.str().contains("\"run_id\":"), "control log run id missing");
     require(logs.str().contains("\"timestamp_unix_ms\":"), "control log timestamp missing");
-    require(state.find("control-test-token") == std::string::npos, "control token leaked through state API");
+    require(!state.contains("control-test-token"), "control token leaked through state API");
 }
 
 void test_live_policy_update_on_open_connection()

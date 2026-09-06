@@ -74,19 +74,30 @@ class Socket
 void set_nonblocking(int descriptor)
 {
     const int flags = ::fcntl(descriptor, F_GETFL, 0);
-    if (flags < 0 || ::fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) < 0)
+    if (flags < 0)
+        throw std::runtime_error("failed to read control socket flags: " + std::string(std::strerror(errno)));
+    const auto updated = static_cast<int>(static_cast<unsigned int>(flags) | static_cast<unsigned int>(O_NONBLOCK));
+    if (::fcntl(descriptor, F_SETFL, updated) < 0)
         throw std::runtime_error("failed to set control socket nonblocking: " + std::string(std::strerror(errno)));
 }
 
 void set_blocking(int descriptor)
 {
     const int flags = ::fcntl(descriptor, F_GETFL, 0);
-    if (flags < 0 || ::fcntl(descriptor, F_SETFL, flags & ~O_NONBLOCK) < 0)
+    if (flags < 0)
+        throw std::runtime_error("failed to read control socket flags: " + std::string(std::strerror(errno)));
+    const auto updated = static_cast<int>(static_cast<unsigned int>(flags) & ~static_cast<unsigned int>(O_NONBLOCK));
+    if (::fcntl(descriptor, F_SETFL, updated) < 0)
         throw std::runtime_error("failed to set control client blocking: " + std::string(std::strerror(errno)));
 #ifdef SO_NOSIGPIPE
     const int enabled = 1;
     (void)::setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
 #endif
+}
+
+bool has_poll_event(short events, int event) noexcept
+{
+    return (static_cast<unsigned int>(static_cast<unsigned short>(events)) & static_cast<unsigned int>(event)) != 0U;
 }
 
 Socket listen_tcp(const std::string &host, std::uint16_t port)
@@ -212,10 +223,10 @@ std::string json_escape(std::string_view value)
             out << "\\t";
             break;
         default:
-            if (const auto escaped = static_cast<unsigned char>(c); escaped < 0x20)
+            if (const auto escaped = static_cast<unsigned int>(static_cast<unsigned char>(c)); escaped < 0x20U)
             {
                 constexpr char hex[] = "0123456789abcdef";
-                out << "\\u00" << hex[escaped >> 4] << hex[escaped & 0x0f];
+                out << "\\u00" << hex[escaped >> 4U] << hex[escaped & 0x0fU];
             }
             else
             {
@@ -250,7 +261,7 @@ bool constant_time_equal(std::string_view left, std::string_view right)
     {
         const unsigned char left_value = index < left.size() ? static_cast<unsigned char>(left[index]) : 0;
         const unsigned char right_value = index < right.size() ? static_cast<unsigned char>(right[index]) : 0;
-        difference |= left_value ^ right_value;
+        difference |= static_cast<std::size_t>(left_value) ^ static_cast<std::size_t>(right_value);
     }
     return difference == 0;
 }
@@ -562,7 +573,7 @@ struct ControlServer::Impl
                     continue;
                 throw std::runtime_error("control poll failed: " + std::string(std::strerror(errno)));
             }
-            if (status == 0 || (descriptor.revents & POLLIN) == 0)
+            if (status == 0 || !has_poll_event(descriptor.revents, POLLIN))
                 continue;
             for (;;)
             {
@@ -582,7 +593,7 @@ struct ControlServer::Impl
                 }
                 auto finished = std::make_shared<std::atomic_bool>(false);
                 workers.push_back(
-                    ControlWorker{finished, std::jthread([this, client = std::move(client), finished]() mutable {
+                    ControlWorker{finished, std::jthread([this, client = std::move(client), finished] mutable {
                                       handle(std::move(client));
                                       finished->store(true);
                                   })});

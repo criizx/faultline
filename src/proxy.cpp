@@ -128,14 +128,27 @@ class Socket
 void set_nonblocking(int fd)
 {
     const int flags = ::fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
-    {
+    if (flags < 0)
+        throw std::runtime_error("failed to read socket flags: " + std::string(std::strerror(errno)));
+    const auto updated = static_cast<int>(static_cast<unsigned int>(flags) | static_cast<unsigned int>(O_NONBLOCK));
+    if (::fcntl(fd, F_SETFL, updated) < 0)
         throw std::runtime_error("failed to set socket nonblocking: " + std::string(std::strerror(errno)));
-    }
 #ifdef SO_NOSIGPIPE
     const int enabled = 1;
     (void)::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
 #endif
+}
+
+bool has_poll_event(short events, int event) noexcept
+{
+    return (static_cast<unsigned int>(static_cast<unsigned short>(events)) & static_cast<unsigned int>(event)) != 0U;
+}
+
+void add_poll_event(short &events, int event) noexcept
+{
+    const auto combined =
+        static_cast<unsigned int>(static_cast<unsigned short>(events)) | static_cast<unsigned int>(event);
+    events = static_cast<short>(combined);
 }
 
 int send_flags() noexcept
@@ -278,10 +291,10 @@ std::string json_escape(std::string_view value)
             out << "\\t";
             break;
         default:
-            if (const auto escaped = static_cast<unsigned char>(c); escaped < 0x20)
+            if (const auto escaped = static_cast<unsigned int>(static_cast<unsigned char>(c)); escaped < 0x20U)
             {
                 constexpr char hex[] = "0123456789abcdef";
-                out << "\\u00" << hex[escaped >> 4] << hex[escaped & 0x0f];
+                out << "\\u00" << hex[escaped >> 4U] << hex[escaped & 0x0fU];
             }
             else
             {
@@ -861,15 +874,15 @@ struct ProxyServer::Impl
 
                 std::array<pollfd, 2> fds{{{client.get(), 0, 0}, {upstream.get(), 0, 0}}};
                 if (!to_upstream.input_closed && to_upstream.queued_bytes < k_max_queued_bytes)
-                    fds[0].events |= POLLIN;
+                    add_poll_event(fds[0].events, POLLIN);
                 if (!to_downstream.input_closed && to_downstream.queued_bytes < k_max_queued_bytes)
-                    fds[1].events |= POLLIN;
+                    add_poll_event(fds[1].events, POLLIN);
                 if (!blackout && !to_downstream.queue.empty() && to_downstream.queue.front().ready_at <= now &&
                     can_write(to_downstream, now))
-                    fds[0].events |= POLLOUT;
+                    add_poll_event(fds[0].events, POLLOUT);
                 if (!blackout && !to_upstream.queue.empty() && to_upstream.queue.front().ready_at <= now &&
                     can_write(to_upstream, now))
-                    fds[1].events |= POLLOUT;
+                    add_poll_event(fds[1].events, POLLOUT);
 
                 int poll_timeout = k_session_poll_timeout_ms;
                 if (!blackout)
@@ -884,20 +897,22 @@ struct ProxyServer::Impl
                 const auto current_runtime = runtime_snapshot(connection_scenario, started, after_poll);
                 to_upstream.policy = current_runtime.upstream;
                 to_downstream.policy = current_runtime.downstream;
-                if (!to_upstream.input_closed && (fds[0].revents & (POLLIN | POLLHUP)) != 0)
+                if (!to_upstream.input_closed &&
+                    (has_poll_event(fds[0].revents, POLLIN) || has_poll_event(fds[0].revents, POLLHUP)))
                     read_pipe(to_upstream, after_poll, random, last_activity);
-                if (!to_downstream.input_closed && (fds[1].revents & (POLLIN | POLLHUP)) != 0)
+                if (!to_downstream.input_closed &&
+                    (has_poll_event(fds[1].revents, POLLIN) || has_poll_event(fds[1].revents, POLLHUP)))
                     read_pipe(to_downstream, after_poll, random, last_activity);
                 if (!blackout_active(current_runtime, after_poll))
                 {
-                    if ((fds[1].revents & POLLOUT) != 0)
+                    if (has_poll_event(fds[1].revents, POLLOUT))
                         write_pipe(to_upstream, after_poll, true, last_activity);
-                    if ((fds[0].revents & POLLOUT) != 0)
+                    if (has_poll_event(fds[0].revents, POLLOUT))
                         write_pipe(to_downstream, after_poll, false, last_activity);
                 }
-                if ((fds[0].revents & (POLLERR | POLLNVAL)) != 0)
+                if (has_poll_event(fds[0].revents, POLLERR) || has_poll_event(fds[0].revents, POLLNVAL))
                     to_upstream.input_closed = true;
-                if ((fds[1].revents & (POLLERR | POLLNVAL)) != 0)
+                if (has_poll_event(fds[1].revents, POLLERR) || has_poll_event(fds[1].revents, POLLNVAL))
                     to_downstream.input_closed = true;
                 maybe_shutdown(to_upstream);
                 maybe_shutdown(to_downstream);
@@ -942,7 +957,7 @@ struct ProxyServer::Impl
                     continue;
                 throw std::runtime_error("accept poll failed: " + std::string(std::strerror(errno)));
             }
-            if (status == 0 || (fd.revents & POLLIN) == 0)
+            if (status == 0 || !has_poll_event(fd.revents, POLLIN))
                 continue;
             for (;;)
             {

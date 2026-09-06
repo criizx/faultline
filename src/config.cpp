@@ -46,10 +46,10 @@ std::string json_escape(std::string_view value)
             out << "\\t";
             break;
         default:
-            if (const auto escaped = static_cast<unsigned char>(c); escaped < 0x20)
+            if (const auto escaped = static_cast<unsigned int>(static_cast<unsigned char>(c)); escaped < 0x20U)
             {
                 constexpr char hex[] = "0123456789abcdef";
-                out << "\\u00" << hex[escaped >> 4] << hex[escaped & 0x0f];
+                out << "\\u00" << hex[escaped >> 4U] << hex[escaped & 0x0fU];
             }
             else
             {
