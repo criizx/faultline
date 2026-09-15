@@ -6,28 +6,6 @@ Faultline is a C++23 TCP proxy that injects latency, jitter, bandwidth limits, c
 
 ![Faultline Control Lab showing a running deterministic chaos experiment](assets/dashboard.jpg)
 
-## Why Faultline
-
-Distributed systems rarely fail cleanly. A request may take five seconds instead of fifty milliseconds, a connection may reset halfway through a response, or bandwidth may collapse while every process remains healthy. Faultline makes those conditions reproducible on a developer machine and in CI.
-
-Current capabilities:
-
-- non-blocking full-duplex TCP forwarding;
-- independent upstream and downstream policies;
-- deterministic jitter and reset decisions;
-- latency and one-shot blackout scheduling;
-- token-bucket bandwidth limiting;
-- idle timeouts and TCP resets;
-- bounded queues and backpressure;
-- graceful shutdown and half-close propagation;
-- strict scenario validation;
-- structured JSON lifecycle logs and metrics;
-- HTTP health, scenario, state, and live metrics endpoints;
-- live latency, jitter, and bandwidth updates without reconnecting clients;
-- ordered time-based stages with per-stage fault policies;
-- confirmed remote shutdown through the local control API;
-- real loopback integration tests.
-
 ## How it fits into your system
 
 Faultline sits between a client and a service that already exists. Instead of sending test traffic directly to the service, point the client at Faultline:
