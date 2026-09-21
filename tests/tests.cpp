@@ -769,7 +769,10 @@ void test_queue_budget_is_enforced()
     const int client = connect_local(proxy_port);
     std::this_thread::sleep_for(20ms);
     const int flags = ::fcntl(client, F_GETFL, 0);
-    require(flags >= 0 && ::fcntl(client, F_SETFL, flags | O_NONBLOCK) == 0, "cannot make queue client nonblocking");
+    require(flags >= 0, "cannot read queue client flags");
+    const auto nonblocking_flags =
+        static_cast<int>(static_cast<unsigned int>(flags) | static_cast<unsigned int>(O_NONBLOCK));
+    require(::fcntl(client, F_SETFL, nonblocking_flags) == 0, "cannot make queue client nonblocking");
     const std::string payload(std::size_t{512} * 1024, 'q');
     std::size_t sent = 0;
     while (sent < payload.size())
