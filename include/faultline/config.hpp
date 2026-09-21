@@ -37,9 +37,13 @@ struct Scenario
     std::uint16_t upstream_port{3000};
     std::uint32_t connect_timeout_ms{5'000};
     std::uint32_t max_connections{256};
+    std::uint32_t max_queued_bytes{2 * 1024 * 1024};
+    std::uint32_t max_total_queued_bytes{128 * 1024 * 1024};
     std::string control_host{"127.0.0.1"};
     std::uint16_t control_port{9090};
     std::string control_token;
+    std::vector<std::string> control_allowed_origins;
+    bool allow_insecure_remote_control{false};
     std::uint64_t seed{1};
     std::uint32_t idle_timeout_ms{30'000};
     std::uint32_t blackout_after_ms{0};

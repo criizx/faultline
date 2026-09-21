@@ -36,6 +36,7 @@ button { color: inherit; }
 .connection-status.online { color: var(--success); }
 .connection-status.offline { color: var(--danger); }
 .connection-status strong { color: var(--text); font-weight: 500; }
+.state-stale .run-summary, .state-stale .metrics, .state-stale .telemetry-stack, .state-stale .secondary-grid { opacity: .58; }
 .icon-button { width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 0; background: transparent; cursor: pointer; }
 .icon-button:hover { background: var(--surface); }
 .icon-button svg { width: 17px; height: 17px; fill: none; stroke: var(--muted); stroke-width: 1.5; }

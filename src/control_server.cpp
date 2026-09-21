@@ -155,17 +155,33 @@ void send_all(int descriptor, std::string_view response)
     }
 }
 
-std::string make_response(int status, std::string_view reason, std::string_view body, std::string_view identity_headers)
+struct ResponseContext
+{
+    std::string_view identity_headers;
+    std::string_view cors_origin;
+};
+
+std::string make_response(int status, std::string_view reason, std::string_view body, ResponseContext context)
 {
     std::ostringstream response;
     response << "HTTP/1.1 " << status << ' ' << reason
              << "\r\nContent-Type: application/json\r\nContent-Length: " << body.size()
-             << "\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *"
-                "\r\nAccess-Control-Allow-Headers: Authorization, Content-Type, X-Faultline-Confirm"
-                "\r\nAccess-Control-Allow-Methods: GET, PUT, POST, OPTIONS"
-                "\r\nAccess-Control-Expose-Headers: X-Faultline-Experiment-ID, X-Faultline-Run-ID\r\n"
-             << identity_headers << "Connection: close\r\n\r\n"
-             << body;
+             << "\r\nCache-Control: no-store\r\n";
+    if (!context.cors_origin.empty())
+    {
+        response << "Access-Control-Allow-Origin: " << context.cors_origin
+                 << "\r\nVary: Origin"
+                    "\r\nAccess-Control-Allow-Headers: Authorization, Content-Type, X-Faultline-Confirm"
+                    "\r\nAccess-Control-Allow-Methods: GET, PUT, POST, OPTIONS"
+                    "\r\nAccess-Control-Expose-Headers: X-Faultline-Experiment-ID, X-Faultline-Run-ID\r\n";
+    }
+    if (status == 401)
+        response << "WWW-Authenticate: Bearer\r\n";
+    if (status == 405)
+        response << "Allow: GET, PUT, POST, OPTIONS\r\n";
+    if (status == 503)
+        response << "Retry-After: 1\r\n";
+    response << context.identity_headers << "Connection: close\r\n\r\n" << body;
     return response.str();
 }
 
@@ -179,6 +195,7 @@ struct ParsedRequest
 struct ControlWorker
 {
     std::shared_ptr<std::atomic_bool> finished;
+    std::string peer;
     std::jthread thread;
 };
 
@@ -251,6 +268,35 @@ std::string lowercase(std::string value)
     std::transform(value.begin(), value.end(), value.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return value;
+}
+
+std::string peer_address(const sockaddr_storage &address, socklen_t size)
+{
+    std::array<char, NI_MAXHOST> host{};
+    if (::getnameinfo(reinterpret_cast<const sockaddr *>(&address), size, host.data(), host.size(), nullptr, 0,
+                      NI_NUMERICHOST) != 0)
+        return "unknown";
+    return host.data();
+}
+
+bool loopback_host(std::string value)
+{
+    value = lowercase(trim(value));
+    if (value.starts_with('['))
+    {
+        const auto closing = value.find(']');
+        if (closing == std::string::npos || value.substr(1, closing - 1) != "::1")
+            return false;
+        return closing + 1 == value.size() || value[closing + 1] == ':';
+    }
+    if (const auto colon = value.rfind(':'); colon != std::string::npos)
+        value.resize(colon);
+    return value == "127.0.0.1" || value == "localhost";
+}
+
+bool origin_allowed(std::string_view origin, const Scenario &scenario)
+{
+    return std::ranges::find(scenario.control_allowed_origins, origin) != scenario.control_allowed_origins.end();
 }
 
 bool constant_time_equal(std::string_view left, std::string_view right)
@@ -395,8 +441,10 @@ ParsedRequest parse_request(std::string_view request)
     std::string method;
     std::string target;
     std::string version;
+    std::string extra;
     line >> method >> target >> version;
-    if (method.empty() || target.empty() || version.rfind("HTTP/", 0) != 0)
+    line >> extra;
+    if (method.empty() || target.empty() || version != "HTTP/1.1" || !extra.empty())
         throw std::runtime_error("invalid HTTP request line");
     ParsedRequest parsed{std::move(method), std::move(target), {}};
     auto remaining = request.substr(line_end + 2);
@@ -414,8 +462,20 @@ ParsedRequest parse_request(std::string_view request)
             throw std::runtime_error("invalid HTTP header");
         auto name = lowercase(trim(header.substr(0, colon)));
         auto value = trim(header.substr(colon + 1));
+        if (name.empty())
+            throw std::runtime_error("invalid HTTP header");
         if (!parsed.headers.emplace(std::move(name), std::move(value)).second)
             throw std::runtime_error("duplicate HTTP header");
+    }
+    if (parsed.headers.contains("transfer-encoding"))
+        throw std::runtime_error("transfer encoding is not supported");
+    if (const auto content_length = parsed.headers.find("content-length"); content_length != parsed.headers.end())
+    {
+        std::uint64_t length{};
+        const auto value = std::string_view(content_length->second);
+        const auto result = std::from_chars(value.data(), value.data() + value.size(), length);
+        if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || length != 0)
+            throw std::runtime_error("request body is not supported");
     }
     return parsed;
 }
@@ -450,8 +510,8 @@ struct ControlServer::Impl
         detail::write_log_line(logs, line.str());
     }
 
-    std::string response(int status, std::string_view reason, std::string_view body,
-                         bool include_identity = false) const
+    std::string response(int status, std::string_view reason, std::string_view body, bool include_identity = false,
+                         std::string_view cors_origin = {}) const
     {
         std::ostringstream headers;
         if (include_identity)
@@ -460,16 +520,16 @@ struct ControlServer::Impl
             headers << "X-Faultline-Experiment-ID: " << lifecycle.experiment_id
                     << "\r\nX-Faultline-Run-ID: " << lifecycle.run_id << "\r\n";
         }
-        return make_response(status, reason, body, headers.str());
+        return make_response(status, reason, body, {headers.str(), cors_origin});
     }
 
-    bool authorized(const ParsedRequest &request) const
+    bool authorized(const ParsedRequest &request, const Scenario &scenario) const
     {
-        const auto token = proxy.scenario_snapshot().control_token;
-        if (token.empty())
+        if (scenario.control_token.empty())
             return true;
         const auto header = request.headers.find("authorization");
-        return header != request.headers.end() && constant_time_equal(header->second, "Bearer " + token);
+        return header != request.headers.end() &&
+               constant_time_equal(header->second, "Bearer " + scenario.control_token);
     }
 
     bool confirmed(const ParsedRequest &request, std::string_view action) const
@@ -480,50 +540,63 @@ struct ControlServer::Impl
 
     std::string route(const ParsedRequest &request)
     {
+        const auto scenario = proxy.scenario_snapshot();
+        const bool loopback_control = scenario.control_host == "127.0.0.1" || scenario.control_host == "::1" ||
+                                      scenario.control_host == "localhost";
+        const auto host = request.headers.find("host");
+        if (host == request.headers.end() || (loopback_control && !loopback_host(host->second)))
+            return response(421, "Misdirected Request", "{\"error\":\"invalid_host\"}");
+        std::string_view cors_origin;
+        if (const auto origin = request.headers.find("origin"); origin != request.headers.end())
+        {
+            if (!origin_allowed(origin->second, scenario))
+                return response(403, "Forbidden", "{\"error\":\"origin_not_allowed\"}");
+            cors_origin = origin->second;
+        }
+        const auto reply = [&](int status, std::string_view reason, std::string_view body,
+                               bool include_identity = false) {
+            return response(status, reason, body, include_identity, cors_origin);
+        };
         if (request.method == "OPTIONS")
-            return response(204, "No Content", {});
-        if (request.target.rfind("/v1/", 0) == 0 && !authorized(request))
-            return response(401, "Unauthorized", "{\"error\":\"authentication_required\"}");
+            return reply(204, "No Content", {});
+        if (request.target.rfind("/v1/", 0) == 0 && !authorized(request, scenario))
+            return reply(401, "Unauthorized", "{\"error\":\"authentication_required\"}");
         if (request.method == "POST" && request.target == "/v1/shutdown")
         {
             if (!confirmed(request, "shutdown"))
-                return response(403, "Forbidden", "{\"error\":\"confirmation_required\"}", true);
+                return reply(403, "Forbidden", "{\"error\":\"confirmation_required\"}", true);
             proxy.request_shutdown();
-            return response(202, "Accepted", "{\"status\":\"stopping\"}", true);
+            return reply(202, "Accepted", "{\"status\":\"stopping\"}", true);
         }
         if (request.method == "PUT" && request.target.rfind("/v1/policies/", 0) == 0)
         {
             if (!confirmed(request, "update"))
-                return response(403, "Forbidden", "{\"error\":\"confirmation_required\"}", true);
-            const auto update = parse_policy_update(request.target, proxy.scenario_snapshot());
+                return reply(403, "Forbidden", "{\"error\":\"confirmation_required\"}", true);
+            const auto update = parse_policy_update(request.target, scenario);
             proxy.update_policy(update.direction, update.policy);
-            return response(200, "OK", scenario_json(proxy.scenario_snapshot()), true);
+            return reply(200, "OK", scenario_json(proxy.scenario_snapshot()), true);
         }
         if (request.method != "GET")
-            return response(405, "Method Not Allowed", "{\"error\":\"method_not_allowed\"}",
-                            request.target.rfind("/v1/", 0) == 0);
+            return reply(405, "Method Not Allowed", "{\"error\":\"method_not_allowed\"}",
+                         request.target.rfind("/v1/", 0) == 0);
         if (request.target == "/healthz")
-            return response(200, "OK", "{\"status\":\"ok\"}");
+            return reply(200, "OK", "{\"status\":\"ok\"}");
         if (request.target == "/v1/metrics")
-            return response(200, "OK", proxy.metrics().json(), true);
+            return reply(200, "OK", proxy.metrics().json(), true);
         if (request.target == "/v1/scenario")
-            return response(200, "OK", scenario_json(proxy.scenario_snapshot()), true);
+            return reply(200, "OK", scenario_json(proxy.scenario_snapshot()), true);
         if (request.target == "/v1/lifecycle")
-            return response(200, "OK", proxy.lifecycle_json(), true);
+            return reply(200, "OK", proxy.lifecycle_json(), true);
         if (request.target == "/v1/connections")
-            return response(200, "OK", proxy.connections_json(), true);
+            return reply(200, "OK", proxy.connections_json(), true);
         if (request.target == "/v1/events" || request.target.starts_with("/v1/events?"))
         {
             const auto query = parse_events_query(request.target);
-            return response(200, "OK", proxy.events_json(query.after_sequence, query.limit), true);
+            return reply(200, "OK", proxy.events_json(query.after_sequence, query.limit), true);
         }
         if (request.target == "/v1/state")
-            return response(200, "OK",
-                            "{\"scenario\":" + scenario_json(proxy.scenario_snapshot()) +
-                                ",\"metrics\":" + proxy.metrics().json() + ",\"lifecycle\":" + proxy.lifecycle_json() +
-                                ",\"connections\":" + proxy.connections_json() + '}',
-                            true);
-        return response(404, "Not Found", "{\"error\":\"not_found\"}", request.target.rfind("/v1/", 0) == 0);
+            return reply(200, "OK", proxy.state_json(), true);
+        return reply(404, "Not Found", "{\"error\":\"not_found\"}", request.target.rfind("/v1/", 0) == 0);
     }
 
     void handle(Socket client)
@@ -531,7 +604,7 @@ struct ControlServer::Impl
         try
         {
             set_blocking(client.get());
-            timeval timeout{1, 0};
+            timeval timeout{0, 250'000};
             (void)::setsockopt(client.get(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
             (void)::setsockopt(client.get(), SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
             std::array<char, 8192> buffer{};
@@ -554,7 +627,14 @@ struct ControlServer::Impl
         catch (const std::exception &error)
         {
             log({"control_bad_request", error.what()});
-            send_all(client.get(), response(400, "Bad Request", "{\"error\":\"bad_request\"}"));
+            try
+            {
+                send_all(client.get(), response(400, "Bad Request", "{\"error\":\"bad_request\"}"));
+            }
+            catch (const std::exception &send_error)
+            {
+                log({"control_response_error", send_error.what()});
+            }
         }
     }
 
@@ -577,7 +657,9 @@ struct ControlServer::Impl
                 continue;
             for (;;)
             {
-                Socket client(::accept(listener.get(), nullptr, nullptr));
+                sockaddr_storage peer_storage{};
+                socklen_t peer_size = sizeof(peer_storage);
+                Socket client(::accept(listener.get(), reinterpret_cast<sockaddr *>(&peer_storage), &peer_size));
                 if (!client)
                 {
                     if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
@@ -585,7 +667,10 @@ struct ControlServer::Impl
                     throw std::runtime_error("control accept failed: " + std::string(std::strerror(errno)));
                 }
                 std::erase_if(workers, [](const ControlWorker &worker) { return worker.finished->load(); });
-                if (workers.size() >= 32)
+                const auto peer = peer_address(peer_storage, peer_size);
+                const auto peer_workers =
+                    std::ranges::count_if(workers, [&](const ControlWorker &worker) { return worker.peer == peer; });
+                if (workers.size() >= 32 || peer_workers >= 8)
                 {
                     set_blocking(client.get());
                     send_all(client.get(), response(503, "Service Unavailable", "{\"error\":\"busy\"}"));
@@ -593,7 +678,7 @@ struct ControlServer::Impl
                 }
                 auto finished = std::make_shared<std::atomic_bool>(false);
                 workers.push_back(
-                    ControlWorker{finished, std::jthread([this, client = std::move(client), finished] mutable {
+                    ControlWorker{finished, peer, std::jthread([this, client = std::move(client), finished] mutable {
                                       handle(std::move(client));
                                       finished->store(true);
                                   })});

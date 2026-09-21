@@ -5,6 +5,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <deque>
 #include <fcntl.h>
@@ -202,10 +203,19 @@ Socket connect_tcp(const std::vector<ResolvedAddress> &addresses, const Scenario
                    const std::atomic_bool &stopping, const std::stop_token &token)
 {
     const auto deadline = Clock::now() + std::chrono::milliseconds(scenario.connect_timeout_ms);
-    for (const auto &address : addresses)
+    for (std::size_t index = 0; index < addresses.size(); ++index)
     {
+        const auto &address = addresses[index];
         if (stopping.load() || token.stop_requested())
             return {};
+        const auto now = Clock::now();
+        if (now >= deadline)
+            break;
+        const auto candidates_left = addresses.size() - index;
+        const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
+        const auto attempt_budget =
+            std::max(std::chrono::milliseconds(100), remaining / static_cast<std::int64_t>(candidates_left));
+        const auto attempt_deadline = std::min(deadline, now + attempt_budget);
         Socket socket(::socket(address.family, address.socket_type, address.protocol));
         if (!socket)
             continue;
@@ -214,7 +224,7 @@ Socket connect_tcp(const std::vector<ResolvedAddress> &addresses, const Scenario
             return socket;
         if (errno != EINPROGRESS)
             continue;
-        while (Clock::now() < deadline && !stopping.load() && !token.stop_requested())
+        while (Clock::now() < attempt_deadline && !stopping.load() && !token.stop_requested())
         {
             pollfd descriptor{socket.get(), POLLOUT, 0};
             const int status = ::poll(&descriptor, 1, 50);
@@ -312,6 +322,12 @@ struct PendingChunk
     Clock::time_point ready_at;
 };
 
+struct QueueCapacity
+{
+    std::size_t connection;
+    std::size_t global;
+};
+
 struct PipeState
 {
     int source{-1};
@@ -364,7 +380,6 @@ struct EventRecord
 };
 
 constexpr std::size_t k_read_buffer_size = std::size_t{16} * 1024;
-constexpr std::size_t k_max_queued_bytes = std::size_t{4} * 1024 * 1024;
 constexpr std::size_t k_event_history_capacity = 2'048;
 constexpr int k_session_poll_timeout_ms = 10;
 
@@ -380,11 +395,14 @@ int poll_timeout_for(const PipeState &pipe, Clock::time_point now, int current_t
 
 MetricsSnapshot Metrics::snapshot() const noexcept
 {
-    return {accepted_connections_.load(), active_connections_.load(),      completed_connections_.load(),
-            reset_connections_.load(),    stage_reset_connections_.load(), timed_out_connections_.load(),
-            upstream_bytes_.load(),       downstream_bytes_.load(),        delayed_chunks_.load(),
-            throttled_writes_.load(),     policy_updates_.load(),          stage_transitions_.load(),
-            blackout_entries_.load()};
+    return {accepted_connections_.load(),    active_connections_.load(),
+            completed_connections_.load(),   reset_connections_.load(),
+            stage_reset_connections_.load(), timed_out_connections_.load(),
+            upstream_bytes_.load(),          downstream_bytes_.load(),
+            delayed_chunks_.load(),          throttled_writes_.load(),
+            policy_updates_.load(),          stage_transitions_.load(),
+            blackout_entries_.load(),        queued_bytes_.load(),
+            queue_pressure_events_.load()};
 }
 
 std::string Metrics::json() const
@@ -397,7 +415,8 @@ std::string Metrics::json() const
         << ",\"timed_out_connections\":" << s.timed_out_connections << ",\"upstream_bytes\":" << s.upstream_bytes
         << ",\"downstream_bytes\":" << s.downstream_bytes << ",\"delayed_chunks\":" << s.delayed_chunks
         << ",\"throttled_writes\":" << s.throttled_writes << ",\"policy_updates\":" << s.policy_updates
-        << ",\"stage_transitions\":" << s.stage_transitions << ",\"blackout_entries\":" << s.blackout_entries << '}';
+        << ",\"stage_transitions\":" << s.stage_transitions << ",\"blackout_entries\":" << s.blackout_entries
+        << ",\"queued_bytes\":" << s.queued_bytes << ",\"queue_pressure_events\":" << s.queue_pressure_events << '}';
     return out.str();
 }
 
@@ -655,6 +674,31 @@ struct ProxyServer::Impl
                elapsed < static_cast<std::int64_t>(runtime.blackout_after_ms) + runtime.blackout_duration_ms;
     }
 
+    bool reserve_queue(std::size_t bytes, std::size_t limit) const noexcept
+    {
+        auto current = metrics->queued_bytes_.load();
+        while (current <= limit && bytes <= limit - current)
+        {
+            if (metrics->queued_bytes_.compare_exchange_weak(current, current + bytes))
+                return true;
+        }
+        metrics->queue_pressure_events_.fetch_add(1);
+        return false;
+    }
+
+    void release_queue(std::size_t bytes) const noexcept
+    {
+        if (bytes != 0)
+            metrics->queued_bytes_.fetch_sub(bytes);
+    }
+
+    void discard_pipe(PipeState &pipe) const noexcept
+    {
+        release_queue(pipe.queued_bytes);
+        pipe.queue.clear();
+        pipe.queued_bytes = 0;
+    }
+
     void enqueue(PipeState &pipe, std::span<const std::byte> bytes, Clock::time_point now,
                  std::mt19937_64 &random) const
     {
@@ -674,20 +718,26 @@ struct ProxyServer::Impl
             metrics->delayed_chunks_.fetch_add(1);
     }
 
-    void read_pipe(PipeState &pipe, Clock::time_point now, std::mt19937_64 &random,
-                   Clock::time_point &last_activity) const
+    void read_pipe(PipeState &pipe, Clock::time_point now, std::mt19937_64 &random, Clock::time_point &last_activity,
+                   QueueCapacity capacity) const
     {
         std::array<std::byte, k_read_buffer_size> buffer{};
-        const auto received = ::recv(pipe.source, buffer.data(), buffer.size(), 0);
+        const auto reservation = std::min(buffer.size(), capacity.connection);
+        if (reservation == 0 || !reserve_queue(reservation, capacity.global))
+            return;
+        const auto received = ::recv(pipe.source, buffer.data(), reservation, 0);
         if (received > 0)
         {
             const auto count = static_cast<std::size_t>(received);
+            release_queue(reservation - count);
             enqueue(pipe, std::span(buffer.data(), count), now, random);
             last_activity = now;
         }
-        else if (received == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
+        else
         {
-            pipe.input_closed = true;
+            release_queue(reservation);
+            if (received == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
+                pipe.input_closed = true;
         }
     }
 
@@ -738,6 +788,7 @@ struct ProxyServer::Impl
             const auto count = static_cast<std::size_t>(sent);
             chunk.offset += count;
             pipe.queued_bytes -= count;
+            release_queue(count);
             pipe.tokens = std::max(0.0, pipe.tokens - static_cast<double>(count));
             if (is_upstream)
                 metrics->upstream_bytes_.fetch_add(count);
@@ -750,8 +801,7 @@ struct ProxyServer::Impl
         else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
         {
             pipe.input_closed = true;
-            pipe.queue.clear();
-            pipe.queued_bytes = 0;
+            discard_pipe(pipe);
         }
     }
 
@@ -790,11 +840,14 @@ struct ProxyServer::Impl
         {
             register_connection(connection_id);
             const auto connection_scenario = scenario_snapshot();
-            std::mt19937_64 random(connection_scenario.seed ^ (connection_id * 0x9e3779b97f4a7c15ULL));
+            const auto connection_seed = connection_scenario.seed ^ (connection_id * 0x9e3779b97f4a7c15ULL);
+            std::mt19937_64 reset_random(connection_seed ^ 0xa0761d6478bd642fULL);
+            std::mt19937_64 upstream_random(connection_seed ^ 0xe7037ed1a0b428dbULL);
+            std::mt19937_64 downstream_random(connection_seed ^ 0x8ebc6af09c88c6e3ULL);
             const auto initial_reset_probability = connection_scenario.stages.empty()
                                                        ? connection_scenario.reset_probability
                                                        : connection_scenario.stages.front().reset_probability;
-            if (std::bernoulli_distribution(initial_reset_probability)(random))
+            if (std::bernoulli_distribution(initial_reset_probability)(reset_random))
             {
                 force_reset(client.get());
                 metrics->reset_connections_.fetch_add(1);
@@ -820,6 +873,17 @@ struct ProxyServer::Impl
             to_downstream.source = upstream.get();
             to_downstream.destination = client.get();
             to_downstream.policy = initial_runtime.downstream;
+            struct QueueGuard
+            {
+                Impl &owner;
+                PipeState &upstream;
+                PipeState &downstream;
+                ~QueueGuard()
+                {
+                    owner.discard_pipe(upstream);
+                    owner.discard_pipe(downstream);
+                }
+            } queue_guard{*this, to_upstream, to_downstream};
             auto last_activity = started;
             std::size_t last_stage_index = initial_runtime.stage_index;
             bool blackout_was_active = false;
@@ -838,7 +902,7 @@ struct ProxyServer::Impl
                         const auto &stage = connection_scenario.stages[stage_index];
                         metrics->stage_transitions_.fetch_add(1);
                         log("stage_transition", connection_id, stage.name);
-                        if (std::bernoulli_distribution(stage.reset_probability)(random))
+                        if (std::bernoulli_distribution(stage.reset_probability)(reset_random))
                         {
                             force_reset(client.get());
                             metrics->reset_connections_.fetch_add(1);
@@ -873,9 +937,12 @@ struct ProxyServer::Impl
                     break;
 
                 std::array<pollfd, 2> fds{{{client.get(), 0, 0}, {upstream.get(), 0, 0}}};
-                if (!to_upstream.input_closed && to_upstream.queued_bytes < k_max_queued_bytes)
+                const auto connection_queued = to_upstream.queued_bytes + to_downstream.queued_bytes;
+                const bool queue_capacity = connection_queued < connection_scenario.max_queued_bytes &&
+                                            metrics->queued_bytes_.load() < connection_scenario.max_total_queued_bytes;
+                if (!to_upstream.input_closed && queue_capacity)
                     add_poll_event(fds[0].events, POLLIN);
-                if (!to_downstream.input_closed && to_downstream.queued_bytes < k_max_queued_bytes)
+                if (!to_downstream.input_closed && queue_capacity)
                     add_poll_event(fds[1].events, POLLIN);
                 if (!blackout && !to_downstream.queue.empty() && to_downstream.queue.front().ready_at <= now &&
                     can_write(to_downstream, now))
@@ -899,10 +966,22 @@ struct ProxyServer::Impl
                 to_downstream.policy = current_runtime.downstream;
                 if (!to_upstream.input_closed &&
                     (has_poll_event(fds[0].revents, POLLIN) || has_poll_event(fds[0].revents, POLLHUP)))
-                    read_pipe(to_upstream, after_poll, random, last_activity);
+                {
+                    const auto queued = to_upstream.queued_bytes + to_downstream.queued_bytes;
+                    const auto available = connection_scenario.max_queued_bytes -
+                                           std::min<std::size_t>(queued, connection_scenario.max_queued_bytes);
+                    read_pipe(to_upstream, after_poll, upstream_random, last_activity,
+                              {available, connection_scenario.max_total_queued_bytes});
+                }
                 if (!to_downstream.input_closed &&
                     (has_poll_event(fds[1].revents, POLLIN) || has_poll_event(fds[1].revents, POLLHUP)))
-                    read_pipe(to_downstream, after_poll, random, last_activity);
+                {
+                    const auto queued = to_upstream.queued_bytes + to_downstream.queued_bytes;
+                    const auto available = connection_scenario.max_queued_bytes -
+                                           std::min<std::size_t>(queued, connection_scenario.max_queued_bytes);
+                    read_pipe(to_downstream, after_poll, downstream_random, last_activity,
+                              {available, connection_scenario.max_total_queued_bytes});
+                }
                 if (!blackout_active(current_runtime, after_poll))
                 {
                     if (has_poll_event(fds[1].revents, POLLOUT))
@@ -1066,6 +1145,21 @@ std::string ProxyServer::events_json(std::uint64_t after_sequence, std::size_t l
 {
     const auto impl = impl_;
     return impl->events_json(after_sequence, limit);
+}
+
+std::string ProxyServer::state_json() const
+{
+    const auto snapshot_started_at = unix_milliseconds();
+    const auto scenario = scenario_json(scenario_snapshot());
+    const auto metrics = metrics_->json();
+    const auto lifecycle = lifecycle_json();
+    const auto connections = connections_json();
+    const auto snapshot_completed_at = unix_milliseconds();
+    std::ostringstream out;
+    out << "{\"scenario\":" << scenario << ",\"metrics\":" << metrics << ",\"lifecycle\":" << lifecycle
+        << ",\"connections\":" << connections << ",\"snapshot\":{\"started_at_unix_ms\":" << snapshot_started_at
+        << ",\"completed_at_unix_ms\":" << snapshot_completed_at << ",\"consistency\":\"component\"}}";
+    return out.str();
 }
 
 }

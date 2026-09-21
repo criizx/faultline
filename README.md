@@ -75,6 +75,8 @@ curl http://127.0.0.1:9090/v1/state
 
 `/v1/events` returns a bounded cursor-based history of lifecycle, connection, stage, blackout, reset, timeout, rejection, error, and live policy events. Consumers retain `next_after` and send it as the next `after` value. A `truncated` response means the cursor fell behind the in-memory history and older events are no longer available.
 
+`/v1/state` collects its scenario, metrics, lifecycle, and connection components sequentially. Its `snapshot` object reports the collection interval and `consistency: "component"`; consumers must not treat the response as a transactionally consistent point-in-time snapshot.
+
 Start the local control dashboard:
 
 ```bash
@@ -82,6 +84,8 @@ python3 -m http.server 4173 --directory ui
 ```
 
 Open `http://127.0.0.1:4173` and use the settings button if the control endpoint or bearer token differs from the defaults.
+
+Browser access is denied unless the exact dashboard origin appears in `control.allowed_origins`. The included local examples allow `http://127.0.0.1:4173` and `http://localhost:4173`. Wildcard origins are rejected.
 
 Change an active policy:
 
@@ -91,7 +95,9 @@ curl -X PUT \
   'http://127.0.0.1:9090/v1/policies/upstream?latency_ms=250&jitter_ms=40&bandwidth_kbps=512'
 ```
 
-Every field is optional, but at least one must be supplied. Updates affect new traffic on existing and future connections. Already queued chunks keep the delay calculated when they were accepted. A control API bound outside loopback requires a `control.token` value of at least 16 characters and `Authorization: Bearer <token>` on every `/v1/*` request.
+Every field is optional, but at least one must be supplied. Updates affect new traffic on existing and future connections. Already queued chunks keep the delay calculated when they were accepted.
+
+A control API bound outside loopback requires a `control.token` value of at least 16 characters and `control.allow_insecure_remote=true`. This is an explicit acknowledgement that the built-in server uses plaintext HTTP. Put it behind a TLS reverse proxy and do not expose port 9090 directly. The bearer token does not protect against network interception.
 
 Request a graceful shutdown:
 
@@ -150,10 +156,13 @@ listen_host=0.0.0.0
 listen_port=8080
 upstream_host=127.0.0.1
 upstream_port=3000
+max_queued_bytes=2097152
+max_total_queued_bytes=134217728
 
 [control]
 host=127.0.0.1
 port=9090
+allowed_origins=http://127.0.0.1:4173,http://localhost:4173
 
 [faults]
 idle_timeout_ms=30000

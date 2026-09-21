@@ -33,6 +33,7 @@ if command -v clang-tidy >/dev/null 2>&1; then
             clang_tidy_extra_args+=(
                 --extra-arg=-isysroot
                 "--extra-arg=$(xcrun --show-sdk-path)"
+                '--extra-arg=-DINFINITY=__builtin_huge_val()'
             )
         fi
         clang-tidy -p .build/checks "${cpp_sources[@]}" \

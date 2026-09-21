@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(faultline VERSION 0.1.0 LANGUAGES CXX)
+project(faultline VERSION 0.1.1 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 
@@ -78,6 +78,7 @@ if(FAULTLINE_BUILD_TESTS)
         fault_wait
         connection_limit
         connect_shutdown
+        queue_budget
         control_api
         event_history
         live_policy

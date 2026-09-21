@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cmath>
 #include <fstream>
 #include <map>
@@ -62,20 +63,49 @@ std::string json_escape(std::string_view value)
 
 std::uint64_t parse_unsigned(const std::string &value, std::string_view key)
 {
-    std::size_t consumed = 0;
-    try
-    {
-        const auto result = std::stoull(value, &consumed);
-        if (consumed != value.size())
-        {
-            throw std::invalid_argument("trailing characters");
-        }
-        return result;
-    }
-    catch (const std::exception &)
-    {
+    std::uint64_t result{};
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
+    if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size())
         throw std::runtime_error("invalid unsigned value for '" + std::string(key) + "': " + value);
+    return result;
+}
+
+bool parse_bool(const std::string &value, std::string_view key)
+{
+    if (value == "true")
+        return true;
+    if (value == "false")
+        return false;
+    throw std::runtime_error("invalid boolean value for '" + std::string(key) + "': " + value);
+}
+
+bool valid_origin(std::string_view origin)
+{
+    const auto scheme_size = origin.starts_with("http://")    ? std::size_t{7}
+                             : origin.starts_with("https://") ? std::size_t{8}
+                                                              : std::size_t{0};
+    if (scheme_size == 0 || origin.size() == scheme_size)
+        return false;
+    const auto authority = origin.substr(scheme_size);
+    return authority.find_first_of("/?#@ \t\r\n*") == std::string_view::npos;
+}
+
+std::vector<std::string> parse_list(const std::string &value)
+{
+    std::vector<std::string> result;
+    std::string_view remaining = value;
+    while (!remaining.empty())
+    {
+        const auto separator = remaining.find(',');
+        auto item = trim(std::string(remaining.substr(0, separator)));
+        if (item.empty())
+            throw std::runtime_error("control.allowed_origins contains an empty origin");
+        result.push_back(std::move(item));
+        if (separator == std::string_view::npos)
+            break;
+        remaining.remove_prefix(separator + 1);
     }
+    return result;
 }
 
 double parse_probability(const std::string &value, std::string_view key)
@@ -180,6 +210,10 @@ Scenario load_scenario(const std::filesystem::path &path)
     set_string("proxy.upstream_host", result.upstream_host);
     set_string("control.host", result.control_host);
     set_string("control.token", result.control_token);
+    if (const auto it = values.find("control.allowed_origins"); it != values.end())
+        result.control_allowed_origins = parse_list(it->second);
+    if (const auto it = values.find("control.allow_insecure_remote"); it != values.end())
+        result.allow_insecure_remote_control = parse_bool(it->second, "control.allow_insecure_remote");
     if (const auto it = values.find("proxy.listen_port"); it != values.end())
         result.listen_port = parse_port(it->second, "proxy.listen_port");
     if (const auto it = values.find("proxy.upstream_port"); it != values.end())
@@ -190,6 +224,8 @@ Scenario load_scenario(const std::filesystem::path &path)
         result.seed = parse_unsigned(it->second, "scenario.seed");
     set_u32("proxy.connect_timeout_ms", result.connect_timeout_ms);
     set_u32("proxy.max_connections", result.max_connections);
+    set_u32("proxy.max_queued_bytes", result.max_queued_bytes);
+    set_u32("proxy.max_total_queued_bytes", result.max_total_queued_bytes);
     set_u32("faults.idle_timeout_ms", result.idle_timeout_ms);
     set_u32("faults.blackout_after_ms", result.blackout_after_ms);
     set_u32("faults.blackout_duration_ms", result.blackout_duration_ms);
@@ -295,9 +331,13 @@ Scenario load_scenario(const std::filesystem::path &path)
                                         "proxy.upstream_port",
                                         "proxy.connect_timeout_ms",
                                         "proxy.max_connections",
+                                        "proxy.max_queued_bytes",
+                                        "proxy.max_total_queued_bytes",
                                         "control.host",
                                         "control.port",
                                         "control.token",
+                                        "control.allowed_origins",
+                                        "control.allow_insecure_remote",
                                         "faults.idle_timeout_ms",
                                         "faults.blackout_after_ms",
                                         "faults.blackout_duration_ms",
@@ -349,6 +389,11 @@ void validate(const Scenario &scenario)
         throw std::runtime_error("connect_timeout_ms must be in 100..300000");
     if (scenario.max_connections == 0 || scenario.max_connections > 100'000)
         throw std::runtime_error("max_connections must be in 1..100000");
+    if (scenario.max_queued_bytes < 16 * 1024 || scenario.max_queued_bytes > 64 * 1024 * 1024)
+        throw std::runtime_error("max_queued_bytes must be in 16384..67108864");
+    if (scenario.max_total_queued_bytes < scenario.max_queued_bytes ||
+        scenario.max_total_queued_bytes > 1024U * 1024U * 1024U)
+        throw std::runtime_error("max_total_queued_bytes must be between max_queued_bytes and 1073741824");
     if (scenario.idle_timeout_ms < 100)
         throw std::runtime_error("idle_timeout_ms must be at least 100");
     if (!std::isfinite(scenario.reset_probability) || scenario.reset_probability < 0.0 ||
@@ -358,6 +403,13 @@ void validate(const Scenario &scenario)
         scenario.control_host == "127.0.0.1" || scenario.control_host == "::1" || scenario.control_host == "localhost";
     if (!loopback_control && scenario.control_token.size() < 16)
         throw std::runtime_error("non-loopback control API requires a token with at least 16 characters");
+    if (!loopback_control && !scenario.allow_insecure_remote_control)
+        throw std::runtime_error("non-loopback control API requires allow_insecure_remote=true or TLS termination");
+    for (const auto &origin : scenario.control_allowed_origins)
+    {
+        if (!valid_origin(origin))
+            throw std::runtime_error("control.allowed_origins must contain exact http or https origins");
+    }
     if ((scenario.blackout_after_ms == 0) != (scenario.blackout_duration_ms == 0))
     {
         throw std::runtime_error("blackout_after_ms and blackout_duration_ms must either both be zero or both be set");
@@ -397,8 +449,11 @@ std::string describe(const Scenario &s)
         << "upstream=" << s.upstream_host << ':' << s.upstream_port << '\n'
         << "connect_timeout=" << s.connect_timeout_ms << "ms\n"
         << "max_connections=" << s.max_connections << '\n'
+        << "max_queued_bytes=" << s.max_queued_bytes << '\n'
+        << "max_total_queued_bytes=" << s.max_total_queued_bytes << '\n'
         << "control=" << s.control_host << ':' << s.control_port << '\n'
         << "control_auth=" << (s.control_token.empty() ? "loopback" : "token") << '\n'
+        << "control_transport=" << (s.allow_insecure_remote_control ? "insecure-http-opt-in" : "loopback") << '\n'
         << "seed=" << s.seed << '\n'
         << "upstream_policy=latency:" << s.upstream.latency_ms << "ms,jitter:" << s.upstream.jitter_ms
         << "ms,bandwidth:" << s.upstream.bandwidth_kbps << "kbps\n"
@@ -421,8 +476,10 @@ std::string scenario_json(const Scenario &s)
         << "\",\"seed\":" << s.seed << ",\"proxy\":{\"listen\":\"" << json_escape(s.listen_host) << ':' << s.listen_port
         << "\",\"upstream\":\"" << json_escape(s.upstream_host) << ':' << s.upstream_port
         << "\",\"connect_timeout_ms\":" << s.connect_timeout_ms << ",\"max_connections\":" << s.max_connections
+        << ",\"max_queued_bytes\":" << s.max_queued_bytes << ",\"max_total_queued_bytes\":" << s.max_total_queued_bytes
         << "},\"control\":{\"listen\":\"" << json_escape(s.control_host) << ':' << s.control_port
-        << "\",\"authentication\":\"" << (s.control_token.empty() ? "loopback" : "token")
+        << "\",\"authentication\":\"" << (s.control_token.empty() ? "loopback" : "token") << "\",\"transport\":\""
+        << (s.allow_insecure_remote_control ? "insecure-http" : "loopback-http")
         << "\"},\"faults\":{\"idle_timeout_ms\":" << s.idle_timeout_ms
         << ",\"blackout_after_ms\":" << s.blackout_after_ms << ",\"blackout_duration_ms\":" << s.blackout_duration_ms
         << ",\"reset_probability\":" << s.reset_probability

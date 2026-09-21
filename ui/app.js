@@ -20,7 +20,10 @@ let eventHistory = []
 let eventCursor = 0
 let eventRunId = null
 let eventHistoryTruncated = false
+let lastSuccessfulPoll = null
+let policySaving = false
 const drafts = { upstream: null, downstream: null }
+const draftVersions = { upstream: 0, downstream: 0 }
 
 const byId = id => document.getElementById(id)
 if (runtime.forceBaseUrl) byId("settingsButton").hidden = true
@@ -158,6 +161,16 @@ function setConnectionStatus(mode, label) {
   node.querySelector("strong").textContent = label
 }
 
+function setStale(stale) {
+  document.body.classList.toggle("state-stale", stale)
+  document.querySelectorAll("input[data-policy]").forEach(input => { input.disabled = stale })
+  byId("policySubmit").disabled = stale || policySaving
+  byId("shutdownButton").disabled = stale
+  byId("connectionStatus").title = stale && lastSuccessfulPoll
+    ? `Last successful update ${new Date(lastSuccessfulPoll).toLocaleTimeString()}`
+    : ""
+}
+
 function renderPolicy() {
   if (!state) return
   const policy = drafts[direction] || state.scenario[direction]
@@ -218,6 +231,8 @@ function render(next) {
   renderStages(scenario.stages, next.connections || [])
   renderHistory()
   renderPolicy()
+  lastSuccessfulPoll = Date.now()
+  setStale(false)
   setConnectionStatus("online", lifecycle.status)
 }
 
@@ -227,9 +242,14 @@ async function poll() {
   try {
     const next = await request("/v1/state")
     render(next)
+    if (byId("formMessage").textContent.startsWith("Control API unavailable:")) {
+      byId("formMessage").textContent = ""
+      byId("formMessage").className = "form-message"
+    }
     await updateEvents(next.lifecycle.run_id)
   } catch (error) {
-    setConnectionStatus("offline", "offline")
+    setConnectionStatus("offline", state ? "offline · stale" : "offline")
+    setStale(true)
     byId("formMessage").textContent = `Control API unavailable: ${error.message}`
     byId("formMessage").className = "form-message error"
   } finally {
@@ -237,15 +257,39 @@ async function poll() {
   }
 }
 
-document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => {
+function activateDirection(tab) {
   direction = tab.dataset.direction
-  document.querySelectorAll(".tab").forEach(item => item.classList.toggle("active", item === tab))
+  document.querySelectorAll(".tab").forEach(item => {
+    const active = item === tab
+    item.classList.toggle("active", active)
+    item.setAttribute("aria-selected", String(active))
+    item.tabIndex = active ? 0 : -1
+  })
+  byId("policyForm").setAttribute("aria-labelledby", tab.id)
   renderPolicy()
-}))
+}
+
+document.querySelectorAll(".tab").forEach(tab => {
+  tab.addEventListener("click", () => activateDirection(tab))
+  tab.addEventListener("keydown", event => {
+    const tabs = [...document.querySelectorAll(".tab")]
+    const index = tabs.indexOf(tab)
+    let next = null
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") next = tabs[(index + 1) % tabs.length]
+    if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = tabs[(index + tabs.length - 1) % tabs.length]
+    if (event.key === "Home") next = tabs[0]
+    if (event.key === "End") next = tabs[tabs.length - 1]
+    if (!next) return
+    event.preventDefault()
+    activateDirection(next)
+    next.focus()
+  })
+})
 
 document.querySelectorAll("input[data-policy]").forEach(input => input.addEventListener("input", () => {
   const values = [byId("latency").value, byId("jitter").value, byId("bandwidth").value]
   drafts[direction] = { latency_ms: values[0], jitter_ms: values[1], bandwidth_kbps: values[2] }
+  draftVersions[direction] += 1
   byId("unsavedBadge").textContent = "Unsaved"
   byId("unsavedBadge").classList.add("dirty")
 }))
@@ -253,13 +297,18 @@ document.querySelectorAll("input[data-policy]").forEach(input => input.addEventL
 byId("policyForm").addEventListener("submit", async event => {
   event.preventDefault()
   const submittedDirection = direction
+  const submittedVersion = draftVersions[submittedDirection]
   const button = event.currentTarget.querySelector("button")
   const query = new URLSearchParams(new FormData(event.currentTarget))
-  button.disabled = true
+  policySaving = true
+  setStale(false)
   try {
     await request(`/v1/policies/${submittedDirection}?${query}`, { method: "PUT", headers: { "X-Faultline-Confirm": "update" } })
-    drafts[submittedDirection] = null
-    byId("formMessage").textContent = `${submittedDirection} policy applied`
+    const unchanged = draftVersions[submittedDirection] === submittedVersion
+    if (unchanged) drafts[submittedDirection] = null
+    byId("formMessage").textContent = unchanged
+      ? `${submittedDirection} policy applied`
+      : `${submittedDirection} policy applied; newer edits remain unsaved`
     byId("formMessage").className = "form-message"
     if (direction === submittedDirection) renderPolicy()
     await poll()
@@ -267,7 +316,8 @@ byId("policyForm").addEventListener("submit", async event => {
     byId("formMessage").textContent = error.message
     byId("formMessage").className = "form-message error"
   } finally {
-    button.disabled = false
+    policySaving = false
+    button.disabled = document.body.classList.contains("state-stale")
   }
 })
 

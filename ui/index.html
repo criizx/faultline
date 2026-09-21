@@ -4,9 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#111417" />
-    <link rel="icon" href="./favicon.svg?v=0.1.0" type="image/svg+xml" />
+    <link rel="icon" href="./favicon.svg?v=0.1.1" type="image/svg+xml" />
     <title>Faultline</title>
-    <link rel="stylesheet" href="./styles.css?v=0.1.0" />
+    <link rel="stylesheet" href="./styles.css?v=0.1.1" />
   </head>
   <body>
     <header class="app-bar">
@@ -50,23 +50,23 @@
             <span class="unsaved" id="unsavedBadge">Saved</span>
           </div>
           <div class="direction-tabs" role="tablist" aria-label="Traffic direction">
-            <button class="tab active" data-direction="upstream" role="tab">Client to upstream</button>
-            <button class="tab" data-direction="downstream" role="tab">Upstream to client</button>
+            <button class="tab active" id="policy-tab-upstream" data-direction="upstream" role="tab" aria-selected="true" aria-controls="policyForm">Client to upstream</button>
+            <button class="tab" id="policy-tab-downstream" data-direction="downstream" role="tab" aria-selected="false" aria-controls="policyForm" tabindex="-1">Upstream to client</button>
           </div>
-          <form id="policyForm">
+          <form id="policyForm" role="tabpanel" aria-labelledby="policy-tab-upstream">
             <label class="policy-row">
               <span class="policy-copy"><b>Latency</b><small>Fixed delay for each forwarded chunk</small></span>
               <span class="value-field"><input id="latency" data-policy name="latency_ms" type="number" inputmode="numeric" min="0" max="5000" step="1" required /><span>ms</span></span>
             </label>
             <label class="policy-row">
-              <span class="policy-copy"><b>Jitter</b><small>Deterministic variance around latency</small></span>
+              <span class="policy-copy"><b>Jitter</b><small>Seeded variance around latency</small></span>
               <span class="value-field"><input id="jitter" data-policy name="jitter_ms" type="number" inputmode="numeric" min="0" max="2000" step="1" required /><span>ms</span></span>
             </label>
             <label class="policy-row">
               <span class="policy-copy"><b>Bandwidth</b><small>Transfer ceiling, 0 disables the limiter</small></span>
               <span class="value-field"><input id="bandwidth" data-policy name="bandwidth_kbps" type="number" inputmode="numeric" min="0" max="100000" step="1" required /><span>kbps</span></span>
             </label>
-            <button class="apply-button" type="submit">Apply policy</button>
+            <button class="apply-button" id="policySubmit" type="submit">Apply policy</button>
           </form>
           <p class="form-message" id="formMessage" role="status"></p>
         </article>
@@ -129,7 +129,7 @@
       </form>
     </dialog>
 
-    <script src="./runtime-config.js?v=0.1.0"></script>
-    <script type="module" src="./app.js?v=0.1.0"></script>
+    <script src="./runtime-config.js?v=0.1.1"></script>
+    <script type="module" src="./app.js?v=0.1.1"></script>
   </body>
 </html>

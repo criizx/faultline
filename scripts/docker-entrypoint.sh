@@ -19,6 +19,8 @@ printf '%s\n' \
   'host=0.0.0.0' \
   'port=9090' \
   'token=faultline-docker-demo' \
+  'allowed_origins=http://127.0.0.1:4173,http://localhost:4173' \
+  'allow_insecure_remote=true' \
   '' \
   '[faults]' \
   'idle_timeout_ms=30000' \

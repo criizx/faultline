@@ -7,6 +7,8 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -218,10 +220,14 @@ upstream_host=localhost
 upstream_port=19090
 connect_timeout_ms=1200
 max_connections=32
+max_queued_bytes=1048576
+max_total_queued_bytes=67108864
 [control]
 host=0.0.0.0
 port=18081
 token=integration-token-123
+allowed_origins=http://127.0.0.1:4173,http://localhost:4173
+allow_insecure_remote=true
 [faults]
 idle_timeout_ms=5000
 reset_probability=0.25
@@ -244,6 +250,10 @@ latency_ms=30
     require(scenario.control_token == "integration-token-123", "control token mismatch");
     require(scenario.connect_timeout_ms == 1200, "connect timeout mismatch");
     require(scenario.max_connections == 32, "connection limit mismatch");
+    require(scenario.max_queued_bytes == 1'048'576, "connection queue limit mismatch");
+    require(scenario.max_total_queued_bytes == 67'108'864, "global queue limit mismatch");
+    require(scenario.control_allowed_origins.size() == 2, "control origin allowlist mismatch");
+    require(scenario.allow_insecure_remote_control, "remote control opt-in mismatch");
     require(scenario.reset_probability == 0.25, "reset probability mismatch");
 }
 
@@ -287,6 +297,45 @@ void test_invalid_config()
     }
     std::filesystem::remove(exposed_path);
     require(rejected, "unauthenticated non-loopback control API was accepted");
+
+    const auto insecure_path = temporary_scenario("[control]\nhost=0.0.0.0\ntoken=integration-token-123\n");
+    rejected = false;
+    try
+    {
+        (void)faultline::load_scenario(insecure_path);
+    }
+    catch (const std::exception &)
+    {
+        rejected = true;
+    }
+    std::filesystem::remove(insecure_path);
+    require(rejected, "remote plaintext control API was accepted without explicit opt-in");
+
+    const auto negative_seed_path = temporary_scenario("[scenario]\nseed=-1\n");
+    rejected = false;
+    try
+    {
+        (void)faultline::load_scenario(negative_seed_path);
+    }
+    catch (const std::exception &)
+    {
+        rejected = true;
+    }
+    std::filesystem::remove(negative_seed_path);
+    require(rejected, "negative seed was accepted");
+
+    const auto origin_path = temporary_scenario("[control]\nallowed_origins=http://localhost:4173/path\n");
+    rejected = false;
+    try
+    {
+        (void)faultline::load_scenario(origin_path);
+    }
+    catch (const std::exception &)
+    {
+        rejected = true;
+    }
+    std::filesystem::remove(origin_path);
+    require(rejected, "origin containing a path was accepted");
 
     faultline::Scenario invalid;
     invalid.control_port = 0;
@@ -699,6 +748,58 @@ void test_connect_shutdown_is_bounded()
     require(elapsed < 500ms, "shutdown waited for upstream connect timeout");
 }
 
+void test_queue_budget_is_enforced()
+{
+    const int upstream_port = free_port();
+    const int proxy_port = free_port();
+    EchoServer echo(upstream_port);
+    faultline::Scenario scenario;
+    scenario.name = "queue-budget";
+    scenario.listen_port = static_cast<std::uint16_t>(proxy_port);
+    scenario.upstream_port = static_cast<std::uint16_t>(upstream_port);
+    scenario.max_queued_bytes = 16 * 1024;
+    scenario.max_total_queued_bytes = 16 * 1024;
+    scenario.blackout_after_ms = 1;
+    scenario.blackout_duration_ms = 5'000;
+    scenario.idle_timeout_ms = 10'000;
+    std::ostringstream logs;
+    faultline::ProxyServer proxy(scenario, logs);
+    std::jthread proxy_thread([&proxy](const std::stop_token &token) { proxy.run(token); });
+    const int client = connect_local(proxy_port);
+    std::this_thread::sleep_for(20ms);
+    const int flags = ::fcntl(client, F_GETFL, 0);
+    require(flags >= 0 && ::fcntl(client, F_SETFL, flags | O_NONBLOCK) == 0, "cannot make queue client nonblocking");
+    const std::string payload(std::size_t{512} * 1024, 'q');
+    std::size_t sent = 0;
+    while (sent < payload.size())
+    {
+        const auto count = ::send(client, payload.data() + sent, payload.size() - sent, 0);
+        if (count > 0)
+        {
+            sent += static_cast<std::size_t>(count);
+            continue;
+        }
+        if (count < 0)
+        {
+            const int send_error = errno;
+            if (send_error == EAGAIN || send_error == EWOULDBLOCK)
+                break;
+        }
+        require(false, "queue client send failed");
+    }
+    for (int index = 0; index < 100 && proxy.metrics().snapshot().queued_bytes == 0; ++index)
+        std::this_thread::sleep_for(5ms);
+    const auto queued = proxy.metrics().snapshot().queued_bytes;
+    require(queued > 0, "queue budget test did not queue traffic");
+    require(queued <= scenario.max_total_queued_bytes, "global queue budget was exceeded");
+    require(queued <= scenario.max_queued_bytes, "connection queue budget was exceeded");
+    ::close(client);
+    proxy.request_stop();
+    proxy_thread.request_stop();
+    proxy_thread.join();
+    require(proxy.metrics().snapshot().queued_bytes == 0, "queued byte accounting leaked after shutdown");
+}
+
 void test_control_api()
 {
     faultline::Scenario scenario;
@@ -706,6 +807,7 @@ void test_control_api()
     scenario.experiment_id = "control-api-test";
     scenario.control_port = static_cast<std::uint16_t>(free_port());
     scenario.control_token = "control-test-token";
+    scenario.control_allowed_origins = {"http://127.0.0.1:4173"};
     std::ostringstream logs;
     faultline::ProxyServer proxy(scenario, logs);
     faultline::ControlServer control(proxy, logs);
@@ -725,6 +827,7 @@ void test_control_api()
     require(!unauthenticated_state.contains("\r\nX-Faultline-Run-ID:"), "unauthenticated response leaked run identity");
 
     const auto state = http_request(scenario.control_port, "GET /v1/state HTTP/1.1\r\nHost: localhost\r\n"
+                                                           "Origin: http://127.0.0.1:4173\r\n"
                                                            "Authorization: Bearer control-test-token\r\n\r\n");
     require(state.contains("200 OK"), "state endpoint failed: " + state + " logs: " + logs.str());
     require(state.contains("\"name\":\"control-api\""), "state scenario missing");
@@ -732,16 +835,38 @@ void test_control_api()
     require(state.contains("\"lifecycle\":{"), "state lifecycle missing");
     require(state.contains("\"run_id\":\""), "state run id missing");
     require(state.contains("\"connections\":[]"), "state connections missing");
+    require(state.contains("\"consistency\":\"component\""), "state snapshot semantics missing");
     require(state.contains("X-Faultline-Experiment-ID: control-api-test"), "experiment response header missing");
     require(state.contains("X-Faultline-Run-ID: "), "run response header missing");
     require(state.contains("Access-Control-Expose-Headers: X-Faultline-Experiment-ID, X-Faultline-Run-ID"),
             "correlation headers are not browser-visible");
 
-    const auto preflight =
-        http_request(scenario.control_port,
-                     "OPTIONS /v1/state HTTP/1.1\r\nHost: localhost\r\nAccess-Control-Request-Method: GET\r\n\r\n");
+    const auto preflight = http_request(
+        scenario.control_port, "OPTIONS /v1/state HTTP/1.1\r\nHost: localhost\r\nOrigin: http://127.0.0.1:4173\r\n"
+                               "Access-Control-Request-Method: GET\r\n\r\n");
     require(preflight.contains("204 No Content"), "control preflight failed");
-    require(preflight.contains("Access-Control-Allow-Origin: *"), "control CORS header missing");
+    require(preflight.contains("Access-Control-Allow-Origin: http://127.0.0.1:4173"),
+            "control CORS allowlist header missing");
+    require(!preflight.contains("Access-Control-Allow-Origin: *"), "wildcard CORS remained enabled");
+
+    const auto rejected_origin = http_request(
+        scenario.control_port, "OPTIONS /v1/state HTTP/1.1\r\nHost: localhost\r\nOrigin: https://attacker.example\r\n"
+                               "Access-Control-Request-Method: PUT\r\n\r\n");
+    require(rejected_origin.contains("403 Forbidden"), "untrusted browser origin was accepted");
+
+    const auto rejected_host =
+        http_request(scenario.control_port, "GET /healthz HTTP/1.1\r\nHost: attacker.example\r\n\r\n");
+    require(rejected_host.contains("421 Misdirected Request"), "non-loopback Host was accepted");
+
+    const auto rejected_body =
+        http_request(scenario.control_port,
+                     "POST /v1/shutdown HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer control-test-token\r\n"
+                     "X-Faultline-Confirm: shutdown\r\nContent-Length: 1\r\n\r\nx");
+    require(rejected_body.contains("400 Bad Request"), "request body framing was ignored");
+
+    const auto rejected_transfer_encoding = http_request(
+        scenario.control_port, "GET /healthz HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n");
+    require(rejected_transfer_encoding.contains("400 Bad Request"), "transfer encoding was accepted");
 
     const auto lifecycle = http_request(scenario.control_port, "GET /v1/lifecycle HTTP/1.1\r\nHost: localhost\r\n"
                                                                "Authorization: Bearer control-test-token\r\n\r\n");
@@ -928,6 +1053,7 @@ int main(int argc, char **argv)
             Test{"fault_wait", test_fault_waits_do_not_trigger_idle_timeout},
             Test{"connection_limit", test_connection_limit_and_worker_reaping},
             Test{"connect_shutdown", test_connect_shutdown_is_bounded},
+            Test{"queue_budget", test_queue_budget_is_enforced},
             Test{"control_api", test_control_api},
             Test{"event_history", test_event_history_is_bounded},
             Test{"live_policy", test_live_policy_update_on_open_connection},

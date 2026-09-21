@@ -28,6 +28,8 @@ struct MetricsSnapshot
     std::uint64_t policy_updates{};
     std::uint64_t stage_transitions{};
     std::uint64_t blackout_entries{};
+    std::uint64_t queued_bytes{};
+    std::uint64_t queue_pressure_events{};
 };
 
 struct LifecycleSnapshot
@@ -78,6 +80,8 @@ class Metrics
     std::atomic_uint64_t policy_updates_{};
     std::atomic_uint64_t stage_transitions_{};
     std::atomic_uint64_t blackout_entries_{};
+    std::atomic_uint64_t queued_bytes_{};
+    std::atomic_uint64_t queue_pressure_events_{};
 };
 
 class ProxyServer
@@ -98,6 +102,7 @@ class ProxyServer
     [[nodiscard]] std::string lifecycle_json() const;
     [[nodiscard]] std::string connections_json() const;
     [[nodiscard]] std::string events_json(std::uint64_t after_sequence, std::size_t limit) const;
+    [[nodiscard]] std::string state_json() const;
     [[nodiscard]] const Metrics &metrics() const noexcept
     {
         return *metrics_;
