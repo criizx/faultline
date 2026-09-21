@@ -411,6 +411,7 @@ void test_proxy_round_trip_and_latency()
     ::close(client);
     proxy.request_stop();
     proxy_thread.request_stop();
+    proxy_thread.join();
     require(response == message, "proxy corrupted payload");
     require(elapsed >= 60ms, "configured round-trip latency was not applied");
     const auto metrics = proxy.metrics().snapshot();
